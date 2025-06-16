@@ -1,6 +1,6 @@
 ---
 sidebar_position: 1
-title: Golang
+title: Golang MVC
 ---
 ## 🌟 Hướng dẫn cho người mới (For Developers)
 

@@ -3,7 +3,9 @@ sidebar_position: 4
 title: Redis
 description: Redis
 ---
-## Cài đặt package và function cần thiết cho WithDistributedLock
+
+## Redis Distributed Lock
+### Cài đặt package và function cần thiết cho WithDistributedLock
 
 **Cài đặt package:**
 
@@ -50,7 +52,7 @@ func (r *redisImpl) WithDistributedLock(ctx context.Context, key string, ttlSeco
 }
 ```
 
-## Sử dụng WithDistributedLock (Khóa phân tán Redis)
+### Sử dụng WithDistributedLock (Khóa phân tán Redis)
 
 `WithDistributedLock` giúp bạn thực thi một đoạn code với đảm bảo chỉ một tiến trình được thực thi tại một thời điểm dựa trên khóa Redis.
 

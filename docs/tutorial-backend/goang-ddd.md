@@ -205,3 +205,6 @@ auth/
     ├── config/         # Configuration
     └── persistence/    # Database implementations
 ```
+
+
+https://uniknow.github.io/AgileDev/site/0.1.8-SNAPSHOT/parent/ddd/core/services

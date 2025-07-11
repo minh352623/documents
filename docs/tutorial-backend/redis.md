@@ -9,14 +9,21 @@ description: Redis
 
 **Cài đặt package:**
 
+Golang:
 ```bash
 go get github.com/bsm/redislock
 go get github.com/redis/go-redis/v9
 go get go.uber.org/zap
 ```
+Nodejs:
+```bash
+npm install ioredis
+npm install redlock
+```
 
 **Ví dụ khởi tạo function và struct:**
 
+Golang:
 ```go
 import (
     "context"
@@ -52,12 +59,62 @@ func (r *redisImpl) WithDistributedLock(ctx context.Context, key string, ttlSeco
 }
 ```
 
+Nodejs:
+```js
+const Redlock = require('redlock');
+const redis = require('ioredis');
+
+const redlock = new Redlock([redisClient], {
+    driftFactor: 0.01, // Tự động gia tăng TTL để tránh các vấn đề đồng bộ
+    retryCount: 10, // Số lần thử lại khi không thể lấy được lock
+    retryDelay: 200 // Khoảng thời gian giữa các lần thử lại
+});
+
+async acquireLock(resource: string, ttl: number) {
+    try {
+      const lock = await redlock.acquire(['lock:' + resource], ttl);
+      this.logger.log(`Lock acquired for resource: ${resource}`);
+      return lock;
+    } catch (error) {
+      this.logger.error(
+        `Error acquiring lock for resource: ${resource}: ${error.message}`,
+      );
+      throw new Error(`Could not acquire lock for resource: ${resource}`);
+    }
+}
+
+  // Release lock function
+async releaseLock(lock: Lock) {
+    try {
+      await lock.release();
+      this.logger.log(`Lock released`);
+    } catch (error) {
+      this.logger.error(`Error releasing lock: ${error.message}`);
+      throw new Error('Failed to release lock');
+    }
+}
+
+async withDistributedLock(
+    resource: string,
+    ttl: number,
+    callback: () => Promise<void>,
+  ) {
+    const lock = await this.acquireLock(resource, ttl * 1000);
+    try {
+      await callback();
+    } finally {
+      await this.releaseLock(lock);
+    }
+}
+```
+
 ### Sử dụng WithDistributedLock (Khóa phân tán Redis)
 
 `WithDistributedLock` giúp bạn thực thi một đoạn code với đảm bảo chỉ một tiến trình được thực thi tại một thời điểm dựa trên khóa Redis.
 
 **Cách sử dụng:**
 
+Golang:
 ```go
 err := redisService.WithDistributedLock(ctx, "ten_khoa", 10, func(ctx context.Context) error {
     // Đặt code cần thực thi bên trong đây
@@ -68,6 +125,20 @@ if err != nil {
     // Xử lý khi không lấy được lock hoặc lỗi khác
     log.Println("Không thể lấy lock:", err)
 }
+```
+
+Nodejs:
+```js
+await this.cacheService.withDistributedLock(cacheKey, ttl, async () => {
+        dataDatabase = {
+          msg: 'hello world',
+        };
+        await this.cacheService.setData(
+          cacheKey,
+          JSON.stringify(dataDatabase),
+          ttl,
+        );
+});
 ```
 
 - `key`: Tên khóa Redis dùng để lock (nên đặt duy nhất cho từng tài nguyên cần bảo vệ).
@@ -257,6 +328,7 @@ go get github.com/redis/go-redis/v9
 
 #### 2. **Cấu hình Redis Client với Sentinel**
 
+Golang:
 ```go
 // internal/initiallize/redis.go
 package initiallize
@@ -299,7 +371,51 @@ func InitRedis() {
     global.Logger.Info("Redis Sentinel connected successfully")
 }
 ```
-
+Nodejs:
+```js
+  async initRedisSentinal() {
+    try {
+      this.redisClient = new Redis({
+        sentinels: [
+          {
+            host: process.env.REDIS_SENTINAL_HOST,
+            port: parseInt(process.env.REDIS_SENTINAL_PORT_1),
+          },
+          {
+            host: process.env.REDIS_SENTINAL_HOST,
+            port: parseInt(process.env.REDIS_SENTINAL_PORT_2),
+          },
+          {
+            host: process.env.REDIS_SENTINAL_HOST,
+            port: parseInt(process.env.REDIS_SENTINAL_PORT_3),
+          },
+        ],
+        name: process.env.REDIS_SENTINAL_MASTER_NAME,
+        password: process.env.REDIS_SENTINAL_PASSWORD,
+        db: parseInt(process.env.REDIS_SENTINAL_DB),
+        sentinelMaxConnections: parseInt(
+          process.env.REDIS_SENTINAL_MAX_CONNECTIONS,
+        ),
+      });
+      // test ping
+      const ping = await this.redisClient.ping();
+      this.logger.verbose('Ping redis sentinal success', ping);
+      // set data
+      await this.redisClient.set('test', 'test');
+      this.logger.verbose('Set data redis sentinal success');
+      // get data
+      const data = await this.redisClient.get('test');
+      this.logger.verbose('Get data redis sentinal success', data);
+      // delete data
+      this.logger.verbose('Create client redis sentinal success');
+      // init redlock
+      await this.initRedLock(this.redisClient);
+      this.logger.verbose('Init redlock success');
+    } catch (err) {
+      console.log('🚀 ~ CacheService ~ initRedisSentinal ~ err:', err);
+    }
+}
+```
 #### 3. **Tạo Redis Service với Sentinel Support**
 
 ```go

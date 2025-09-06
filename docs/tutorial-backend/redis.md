@@ -5,6 +5,26 @@ description: Redis
 ---
 
 ## Redis Distributed Lock
+
+### Distributed Lock là gì?
+Distributed Lock là một cơ chế kiểm soát quyền truy cập vào các tài nguyên dùng chung trong một hệ thống phân tán. Không giống như các cơ chế lock truyền thống chỉ hoạt động trong phạm vi một instance, distributed lock đảm bảo rằng tại một thời điểm chỉ có một tiến trình duy nhất có thể truy cập vào tài nguyên, bất kể các tiến trình này đang chạy trên một hay nhiều server khác nhau. Cơ chế này giúp ngăn chặn xung đột, bảo vệ tính toàn vẹn của dữ liệu và duy trì sự nhất quán trong các môi trường phân tán phức tạp.
+
+### Triển khai Distributed Lock với Redis
+![redis-distributed-lock.jpg](/redis-distributed-lock.jpg)
+
+Lúc này, quy trình xử lý hai request sẽ diễn ra như sau:
+ Bước 1: Yêu cầu tạo khóa
+- Request 1 và 2 cùng yêu cầu tạo một khóa trên Redis để lock user_id của A:
+  - Request 1 tạo được khóa trước ⇒ Request 1 được xử lý (bước 1.1)
+  - Request 2 phải chờ khi request 1 giải phóng khóa hoặc khi khóa hết hạn (Request 2 lặp lại bước 1 yêu cầu tạo khóa) Bước 2: Request 1 hoàn tất xử lý
+- Tính toán số dư mới: 1000 - 200 = 800
+- Ghi lại số dư tài khoản là 800$ vào hệ thống
+- Giải phóng khóa trong Redis Bước 3: Request 2 xử lý giao dịch
+- Request 2 tạo được khóa và tiến hành xử lý giao dịch
+- Tính toán số dư mới: 800 - 300 = 500
+- Ghi lại số dư tài khoản là 500$ vào hệ thống
+- Giải phóng khóa trong Redis
+
 ### Cài đặt package và function cần thiết cho WithDistributedLock
 
 **Cài đặt package:**

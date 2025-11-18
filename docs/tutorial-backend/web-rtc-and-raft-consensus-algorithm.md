@@ -672,12 +672,12 @@ cleanup(): void
 You can adjust these constants in `src/utils/raft.ts`:
 
 ```typescript
-// Election timeout range (randomized to prevent split votes)
-private readonly ELECTION_TIMEOUT_MIN = 3000;  // 3 seconds
-private readonly ELECTION_TIMEOUT_MAX = 5000;  // 5 seconds
+// Election timeout range (randomized)
+private readonly ELECTION_TIMEOUT_MIN = 1000;   // 1s
+private readonly ELECTION_TIMEOUT_MAX = 30000;  // 30s
 
-// Heartbeat interval (must be < election timeout min)
-private readonly HEARTBEAT_INTERVAL = 1500;    // 1.5 seconds
+// Heartbeat interval (AppendEntries empty)
+private readonly HEARTBEAT_INTERVAL = 500;      // 0.5s
 ```
 
 **Guidelines:**
@@ -712,9 +712,9 @@ For production, consider adding TURN servers for NAT traversal.
 - **Fix**: Ensure `addPeer()` is called after data channel opens
 
 #### 2. **Multiple leaders elected**
-- **Cause**: Network partition or term mismatch
-- **Check**: Are heartbeats being sent/received?
-- **Fix**: Ensure term numbers are synchronized
+- **Cause**: Split-brain (elections before data channel/RAFT ready)
+- **Check**: Add RAFT peers only after data channel opens
+- **Fix**: Step down to follower on valid AppendEntries from another leader (term ≥ current)
 
 #### 3. **Files not receiving**
 - **Cause**: Data channel buffer overflow or metadata mismatch

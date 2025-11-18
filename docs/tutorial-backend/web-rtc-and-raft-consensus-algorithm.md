@@ -3,34 +3,219 @@ sidebar_position: 6
 title: WebRTC and RAFT Consensus-Algorithm
 description: WebRTC and RAFT Consensus-Algorithm
 ---
-# P2P WebRTC with RAFT Consensus - Technical Documentation
 
-## Table of Contents
-1. [Architecture Overview](#architecture-overview)
-2. [WebRTC Implementation](#webrtc-implementation)
-3. [RAFT Consensus Algorithm](#raft-consensus-algorithm)
-4. [Integration](#integration)
-5. [Key Flows](#key-flows)
-6. [API Reference](#api-reference)
+# Triển khai WebRTC
 
----
+## Tổng quan
+WebRTC cho phép kết nối P2P để truyền audio/video/data giữa trình duyệt sau bước signaling ban đầu.
 
-## Architecture Overview
+## Thành phần
+- WebRTCManager (`src/utils/webrtc.ts`): Quản lý vòng đời kết nối peer, signaling Centrifugo, media streams, và data channel.
 
-This application implements a **peer-to-peer (P2P) communication system** using WebRTC with **RAFT consensus** for distributed leader election. The system enables:
+## Luồng kết nối
+```
+1. Tạo/Join room
+2. Kết nối Centrifugo
+3. Subscribe vào channel của room
+4. Announce presence
+5. Nhận danh sách peers/peer mới
+6. Với mỗi peer: tạo RTCPeerConnection, tạo offer (nếu initiator), trao đổi SDP, trao đổi ICE
+7. Kết nối P2P sẵn sàng ✓
+```
 
-- Real-time video/audio streaming between peers
-- Text messaging via data channels
-- File transfer capabilities
-- Automatic leader election among connected peers
-- Fault-tolerant distributed coordination
+## Signaling Messages
+Chỉ phục vụ SDP/ICE và hiện diện peer (RAFT không đi qua signaling):
+```typescript
+interface SignalingMessage {
+  type: 'offer' | 'answer' | 'ice-candidate' | 'peer-joined' | 'peer-list';
+  from: string;
+  to?: string;
+  data?: any;
+  peers?: string[];
+}
+```
 
-### High-Level Architecture
+## Media Streams
+- Local/Remote streams; bật/tắt video/audio theo nhu cầu.
+```typescript
+await webrtcManager.enableVideo(true);
+await webrtcManager.enableVideo(false);
+```
 
+## Data Channels
+- Legacy text message: `{ type: 'message', content }`
+- File transfer: `{ type: 'file-meta', ... }` + ArrayBuffer
+- RAFT messages: `{ type: 'raft', message }`
+- Client → Leader chat: `{ type: 'client-message', message }`
+
+## Truyền RAFT qua data channel
+```typescript
+// src/utils/webrtc.ts
+sendRaftMessage(peerId: string, message: RaftMessage) {
+  const peer = this.peers.get(peerId);
+  if (peer?.dataChannel?.readyState === 'open') {
+    peer.dataChannel.send(JSON.stringify({ type: 'raft', message }));
+  }
+}
+```
+
+## Thuật toán RAFT
+
+### Trạng thái node
+```
+Follower → Candidate → Leader
+```
+- Follower: chờ AppendEntries/heartbeat; hết timeout thì thành Candidate.
+- Candidate: tăng `term`, tự bỏ phiếu, gửi `vote-request`; nhận đa số thì thành Leader.
+- Leader: gửi AppendEntries (rỗng hoặc kèm entries) định kỳ; đảm bảo chỉ 1 leader/term.
+
+### RaftManager (`src/utils/raft.ts`)
+Thuộc tính chính (rút gọn): `nodeId`, `state`, `currentTerm`, `votedFor`, `leaderId`, `peers`, cùng các hằng thời gian.
+
+### Kiểu message
+```typescript
+interface RaftMessage {
+  type: 'heartbeat' | 'vote-request' | 'vote-response' | 'append-entries';
+  term: number;
+  from: string;
+  to?: string;
+  candidateId?: string;
+  voteGranted?: boolean;
+  leaderId?: string;
+}
+```
+
+### Bầu cử và đa số
+```typescript
+const majorityNeeded = Math.floor((peers.size + 1) / 2) + 1;
+```
+Ví dụ: 1 node → 1; 2 nodes → 2; 3 nodes → 2; 5 nodes → 3.
+
+### Heartbeat (AppendEntries rỗng)
+- Leader gửi AppendEntries rỗng (kèm `leaderCommit`) theo `HEARTBEAT_INTERVAL`.
+- Follower reset election timeout khi nhận gói hợp lệ; nếu không, sẽ mở bầu cử mới.
+
+## Tích hợp WebRTC + RAFT
+
+### Tầng vận chuyển
+RAFT chạy trên data channel WebRTC; chỉ thêm peer RAFT sau khi channel mở.
+
+### Khả năng chịu lỗi
+Leader rời đi → followers ngừng nhận AppendEntries → hết timeout → bầu leader mới → hệ thống tiếp tục.
+
+## API Tham chiếu
+
+### WebRTCManager
+```typescript
+new WebRTCManager(localId: string)
+// Kết nối signaling và join room
+connectToCentrifugo(url: string, roomId: string, token?: string): Promise<void>
+// Ngắt kết nối
+disconnect(): void
+// Xoá peer
+removePeer(peerId: string): void
+// Bật/tắt media
+enableVideo(enable: boolean): Promise<void>
+// Gửi message/raft/file
+sendMessage(peerId: string, message: string): void
+broadcastMessage(message: string): void
+sendFile(peerId: string, file: File): Promise<void>
+sendRaftMessage(peerId: string, message: RaftMessage): void
+// Đăng ký callback
+setOnMessage(cb)
+setOnFile(cb)
+setOnPeerConnected(cb)
+setOnPeerDisconnected(cb)
+setOnStream(cb)
+setOnRaftMessage(cb)
+```
+
+### RaftManager
+```typescript
+new RaftManager(nodeId: string)
+// Quản lý peer
+addPeer(peerId: string): void
+removePeer(peerId: string): void
+// Xử lý message RAFT
+handleMessage(message: RaftMessage): void
+// Truy vấn trạng thái
+getState(): NodeState
+getLeaderId(): string | null
+isLeader(): boolean
+// Callback
+setOnSendMessage(cb): void
+setOnStateChange(cb): void
+// Dọn dẹp
+cleanup(): void
+```
+
+## Thực hành tốt
+- Dọn dẹp khi unmount: đóng WebRTC và RAFT timers.
+- Chỉ leader thực hiện hành động điều phối.
+- Lắng nghe và xử lý chuyển trạng thái để cập nhật UI.
+
+## Khắc phục sự cố
+- Candidate không được vote: kiểm tra kết nối WebRTC/data channel.
+- Nhiều leader: chỉ thêm RAFT peer sau data channel open; step-down khi nhận AppendEntries hợp lệ từ leader khác.
+- Bầu cử liên tục: kiểm tra latency và thông số thời gian; tăng election timeout hoặc giảm heartbeat interval.
+- Không nhận file: xem buffer data channel; cân nhắc chia nhỏ dữ liệu.
+
+## Nhân bản log và phục hồi dữ liệu
+
+### Cấu trúc entry
+```typescript
+interface LogEntry {
+  term: number;
+  index: number;
+  data: any;
+  timestamp: number;
+}
+```
+
+### Cách hoạt động
+1. Leader `appendEntry(data)` → tạo entry và replicate
+2. Follower kiểm tra `prevLogIndex/prevLogTerm`, append và phản hồi
+3. Leader commit khi đủ đa số → cập nhật `commitIndex` → thông báo followers
+4. Khi thay đổi leader: leader mới đồng bộ followers; entries xung đột được ghi đè theo leader
+
+### Ví dụ sử dụng
+```typescript
+raftManager.setOnLogEntry((entry) => {
+  // apply vào state ứng dụng
+});
+
+if (raftManager.isLeader()) {
+  raftManager.appendEntry({ type: 'message', content: 'Hello World', sender: peerId });
+}
+
+const log = raftManager.getLog();
+const commitIndex = raftManager.getCommitIndex();
+```
+
+### Cam kết phục hồi
+- Bền vững: entry đã commit tồn tại qua thay đổi leader
+- Nhất quán: tất cả nodes cuối cùng có cùng log theo cùng thứ tự
+- Tự động đồng bộ: leader mới chủ động đồng bộ lại followers
+
+## Nâng cấp tương lai
+- Lưu trữ bền vững (IndexedDB/localStorage), snapshot/compaction
+- Bảo mật: mã hoá message data channel, xác thực RAFT
+- Truyền file tối ưu: chunking, tiến trình, resume
+- Theo dõi hiệu năng: tần suất bầu cử, latency heartbeat, log state transitions
+
+## Giấy phép & ghi công
+Dựa trên RAFT (Diego Ongaro, John Ousterhout). WebRTC theo chuẩn API của trình duyệt.
+
+## Luồng Dữ Liệu P2P WebRTC + RAFT (Tiếng Việt)
+
+## Mục tiêu
+- Mô tả tổng quan cách peers tham gia phòng, bầu leader, gửi/đồng bộ tin nhắn qua replicated log RAFT.
+- Làm rõ cơ chế flush 20 messages (leader-only) tới API và xoá đồng bộ.
+
+## Kiến trúc tổng quan
 ```
 ┌─────────────┐         ┌─────────────┐         ┌─────────────┐
 │   Peer A    │◄───────►│   Peer B    │◄───────►│   Peer C    │
-│             │         │             │         │             │
 │ WebRTC Mgr  │         │ WebRTC Mgr  │         │ WebRTC Mgr  │
 │ RAFT Mgr    │         │ RAFT Mgr    │         │ RAFT Mgr    │
 │ (Follower)  │         │ (Leader)    │         │ (Follower)  │
@@ -45,831 +230,132 @@ This application implements a **peer-to-peer (P2P) communication system** using 
                         └─────────────┘
 ```
 
----
-
-## WebRTC Implementation
-
-### Overview
-
-**WebRTC (Web Real-Time Communication)** enables peer-to-peer connections for audio, video, and data transfer directly between browsers without a central server (after initial signaling).
-
-### Components
-
-#### 1. **WebRTCManager** (`src/utils/webrtc.ts`)
-
-Main class managing all WebRTC peer connections.
-
-**Key Responsibilities:**
-- Managing peer connections lifecycle
-- Handling signaling via Centrifugo
-- Managing media streams (video/audio)
-- Data channel communication (messages, files, RAFT messages)
-
-#### 2. **Connection Flow**
-
-```
-1. User creates/joins room
-   ↓
-2. Connect to Centrifugo signaling server
-   ↓
-3. Subscribe to room channel
-   ↓
-4. Announce presence to room
-   ↓
-5. Receive peer list / new peer notifications
-   ↓
-6. For each peer:
-   - Create RTCPeerConnection
-   - Create offer (if initiator)
-   - Exchange SDP via signaling
-   - Exchange ICE candidates
-   - Establish P2P connection
-   ↓
-7. Connection established ✓
-```
-
-#### 3. **Signaling Messages**
-
-Messages exchanged via Centrifugo for WebRTC setup:
-
-```typescript
-interface SignalingMessage {
-  type: 'offer' | 'answer' | 'ice-candidate' | 'join' | 'leave' | 'raft-message';
-  from: string;           // Sender's peer ID
-  to?: string;            // Target peer ID (optional)
-  offer?: RTCSessionDescriptionInit;
-  answer?: RTCSessionDescriptionInit;
-  candidate?: RTCIceCandidateInit;
-  raftMessage?: RaftMessage;  // RAFT consensus messages
-}
-```
-
-#### 4. **Media Streams**
-
-- **Local Stream**: Captured from user's camera/microphone
-- **Remote Streams**: Received from connected peers
-- **Controls**: Enable/disable video and audio independently
-
-```typescript
-// Enable video with audio
-await webrtcManager.enableVideo(true);
-
-// Disable video
-await webrtcManager.enableVideo(false);
-```
-
-#### 5. **Data Channels**
-
-Each peer connection includes a data channel for:
-- **Text messages**: JSON-encoded messages
-- **File transfers**: Binary data chunks
-- **RAFT messages**: Consensus protocol communication
-
-**Message Format:**
-```typescript
-// Text message
-{
-  type: 'message',
-  message: 'Hello!'
-}
-
-// File metadata
-{
-  type: 'file-metadata',
-  fileName: 'image.png',
-  fileSize: 12345,
-  fileType: 'image/png'
-}
-
-// File data (binary)
-ArrayBuffer
-
-// RAFT message
-{
-  type: 'raft-message',
-  raftMessage: { ... }
-}
-```
-
-#### 6. **File Transfer**
-
-Files are sent in a two-step process:
-
-```
-1. Send file metadata (name, size, type)
-   ↓
-2. Send file data as ArrayBuffer
-   ↓
-3. Receiver reconstructs file from metadata + data
-```
-
----
-
-## RAFT Consensus Algorithm
-
-### Overview
-
-**RAFT** is a consensus algorithm designed to manage a replicated log across distributed systems. In this application, we use RAFT for **leader election** to ensure only one peer acts as the coordinator.
-
-### Node States
-
-```
-┌───────────┐
-│ Follower  │ ◄─── Initial state
-└─────┬─────┘
-      │ Election timeout
-      ▼
-┌───────────┐
-│ Candidate │ ◄─── Requests votes
-└─────┬─────┘
-      │ Receives majority votes
-      ▼
-┌───────────┐
-│  Leader   │ ◄─── Sends heartbeats
-└───────────┘
-```
-
-#### 1. **Follower**
-- Default state for all nodes
-- Listens for heartbeats from leader
-- If no heartbeat received → becomes Candidate
-
-#### 2. **Candidate**
-- Increments term number
-- Votes for itself
-- Requests votes from all peers
-- If receives majority → becomes Leader
-- If receives heartbeat from valid leader → becomes Follower
-
-#### 3. **Leader**
-- Sends periodic heartbeats to all followers
-- Maintains authority over the cluster
-- Only one leader exists per term
-
-### RaftManager (`src/utils/raft.ts`)
-
-#### Key Properties
-
-```typescript
-class RaftManager {
-  private nodeId: string;              // Unique node identifier
-  private state: NodeState;            // 'follower' | 'candidate' | 'leader'
-  private currentTerm: number;         // Current election term
-  private votedFor: string | null;     // Voted candidate in current term
-  private leaderId: string | null;     // Current leader's ID
-  private peers: Set<string>;          // Connected peer IDs
-  
-  // Timing constants
-  private ELECTION_TIMEOUT_MIN = 3000;   // 3 seconds
-  private ELECTION_TIMEOUT_MAX = 5000;   // 5 seconds
-  private HEARTBEAT_INTERVAL = 1500;     // 1.5 seconds
-}
-```
-
-#### Message Types
-
-```typescript
-interface RaftMessage {
-  type: 'heartbeat' | 'vote-request' | 'vote-response' | 'append-entries';
-  term: number;           // Current term number
-  from: string;           // Sender's node ID
-  to?: string;            // Target node ID
-  candidateId?: string;   // Candidate requesting vote
-  voteGranted?: boolean;  // Vote response
-  leaderId?: string;      // Current leader ID
-}
-```
-
-### Leader Election Process
-
-#### Step-by-Step Flow
-
-```
-1. Node starts as Follower
-   ↓
-2. Election timeout expires (3-5s random)
-   ↓
-3. Become Candidate:
-   - Increment term
-   - Vote for self
-   - Send vote-request to all peers
-   ↓
-4. Peers respond with vote-response:
-   - Grant vote if haven't voted in this term
-   - Deny vote if already voted or higher term
-   ↓
-5. If majority votes received:
-   → Become Leader
-   → Start sending heartbeats
-   ↓
-6. If heartbeat received from valid leader:
-   → Become Follower
-   ↓
-7. If election timeout expires again:
-   → Start new election (goto step 3)
-```
-
-#### Majority Calculation
-
-```typescript
-// For N peers + 1 (self)
-const majorityNeeded = Math.floor((peers.size + 1) / 2) + 1;
-
-// Examples:
-// 1 node (no peers):  majority = 1  (self vote enough)
-// 2 nodes:            majority = 2  (need both)
-// 3 nodes:            majority = 2  (need 2 out of 3)
-// 5 nodes:            majority = 3  (need 3 out of 5)
-```
-
-### Heartbeat Mechanism
-
-**Leader sends heartbeats every 1.5 seconds:**
-
-```typescript
-heartbeat: {
-  type: 'heartbeat',
-  term: currentTerm,
-  from: leaderId,
-  leaderId: leaderId
-}
-```
-
-**Followers reset election timeout on heartbeat receipt:**
-- Ensures leader authority is maintained
-- Prevents unnecessary elections
-- If no heartbeat → triggers new election
-
----
-
-## Integration
-
-### How WebRTC and RAFT Work Together
-
-#### 1. **Transport Layer**
-
-RAFT messages are transmitted over WebRTC data channels:
-
-```typescript
-// In WebRTCManager
-sendRaftMessage(peerId: string, message: RaftMessage) {
-  const peer = this.peers.get(peerId);
-  if (peer?.dataChannel?.readyState === 'open') {
-    peer.dataChannel.send(JSON.stringify({
-      type: 'raft-message',
-      raftMessage: message
-    }));
-  }
-}
-```
-
-#### 2. **Peer Discovery**
-
-When WebRTC connects/disconnects peers, RAFT is notified:
-
-```typescript
-// On peer connected
-raftManager.addPeer(peerId);
-
-// On peer disconnected
-raftManager.removePeer(peerId);
-```
-
-#### 3. **Leader-Driven Actions**
-
-Only the leader can perform certain privileged operations:
-
-```typescript
-if (raftManager.isLeader()) {
-  // Perform leader-only actions
-  // e.g., coordinate file transfers, manage state, etc.
-}
-```
-
-#### 4. **Fault Tolerance**
-
-If the leader disconnects:
-```
-1. Followers detect missing heartbeats
-   ↓
-2. Election timeout expires
-   ↓
-3. New election begins
-   ↓
-4. New leader elected
-   ↓
-5. System continues operating
-```
-
----
-
-## Key Flows
-
-### Flow 1: Initial Room Creation (Single Peer)
-
+## Tham gia phòng (Join)
+- Signaling (SDP/ICE) qua Centrifugo để thiết lập WebRTC.
+- Chỉ thêm peer vào RAFT sau khi data channel mở (giảm split-brain):
+  - WebRTC `ondatachannel.open` → thêm peer vào RAFT.
+
+Flow:
 ```
 ┌──────────────────────────────────────────────┐
-│ 1. User creates room                         │
-│    - Generate unique room ID                 │
-│    - Connect to Centrifugo signaling server  │
+│ 1. Join room + subscribe channel             │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 2. RaftManager initialized                   │
-│    - State: Follower                         │
-│    - Peers: 0                                │
+│ 2. Exchange offer/answer + ICE               │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 3. Election timeout expires                  │
-│    - No peers present                        │
-│    - Become Candidate                        │
-│    - Vote for self                           │
-│    - Check majority: 1/1 ✓                   │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 4. Become Leader                             │
-│    - State: Leader                           │
-│    - Start heartbeat timer                   │
-│    - Ready for new peers                     │
+│ 3. Data channel opened                       │
+│    - raft.addPeer(peerId)                    │
+│    - Peer vào trạng thái Follower            │
 └──────────────────────────────────────────────┘
 ```
+Tham chiếu: `src/utils/webrtc.ts:403-405`, `src/pages/Index.tsx:120-127`.
 
-### Flow 2: Peer Joining Room
+## Bầu cử Leader (tóm tắt)
+- Follower → Candidate khi timeout election.
+- Gửi vote-request; nhận đa số → trở thành Leader.
+- Nếu nhận AppendEntries hợp lệ từ leader khác (term ≥ current) → hạ xuống Follower.
+Tham chiếu: `src/utils/raft.ts:252-268`, `src/utils/raft.ts:235-250`, `src/utils/raft.ts:405-410`.
 
+## Gửi tin nhắn (Leader)
 ```
 ┌──────────────────────────────────────────────┐
-│ 1. New peer joins room                       │
-│    - Connect to Centrifugo                   │
-│    - Send 'join' message to room             │
+│ 1. User (leader) tạo message                 │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 2. Existing peers receive 'join'             │
-│    - Create RTCPeerConnection                │
-│    - Create offer                            │
-│    - Send offer via signaling                │
+│ 2. Leader appendEntry(message)               │
+│    - Log[n] = message                        │
+│    - syncLogs() → AppendEntries tới followers│
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 3. New peer receives offer                   │
-│    - Create RTCPeerConnection                │
-│    - Set remote description                  │
-│    - Create answer                           │
-│    - Send answer via signaling               │
+│ 3. Followers append + append-response success│
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 4. Exchange ICE candidates                   │
-│    - Both peers send candidates              │
-│    - P2P connection established              │
+│ 4. Leader commit khi đủ đa số                │
+│    - updateCommitIndex()                     │
+│    - applyCommittedEntries()                 │
+│    - syncLogs() propagate leaderCommit       │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 5. Data channel opened                       │
-│    - RaftManager.addPeer(peerId)             │
-│    - New peer state: Follower                │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 6. Leader sends heartbeat                    │
-│    - New peer receives heartbeat             │
-│    - Acknowledges leader                     │
-│    - Resets election timeout                 │
+│ 5. Followers apply commit                    │
+│    - UI setOnLogEntry → hiển thị tin nhắn    │
 └──────────────────────────────────────────────┘
 ```
+Tham chiếu: `src/utils/raft.ts:346-366`, `src/utils/raft.ts:368-393`, `src/utils/raft.ts:463-470`, `src/utils/raft.ts:477-494`, `src/pages/Index.tsx:130-151`.
 
-### Flow 3: Leader Failure & Re-election
-
+## Gửi tin nhắn (Follower)
 ```
 ┌──────────────────────────────────────────────┐
-│ 1. Leader disconnects/fails                  │
-│    - WebRTC connection closed                │
-│    - Followers stop receiving heartbeats     │
+│ 1. User (follower) tạo message               │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 2. RaftManager.removePeer(leaderId)          │
-│    - Detect leader is disconnected           │
-│    - Immediately trigger election            │
+│ 2. Gửi client-message tới leader             │
+│    dataChannel.send({type:'client-message'}) │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 3. First peer's election timeout expires     │
-│    - Become Candidate                        │
-│    - Increment term                          │
-│    - Request votes from all peers            │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 4. Other peers receive vote-request          │
-│    - Grant vote (haven't voted this term)    │
-│    - Send vote-response back                 │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 5. Candidate receives majority votes         │
-│    - Become new Leader                       │
-│    - Start sending heartbeats                │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 6. Other peers receive heartbeat             │
-│    - Recognize new leader                    │
-│    - Become/remain Followers                 │
-│    - System stabilized ✓                     │
+│ 3. Leader nhận client-message                │
+│    - appendEntry(message)                    │
+│    - Theo flow của Leader ở trên             │
 └──────────────────────────────────────────────┘
 ```
+Tham chiếu: `src/utils/webrtc.ts:471-481`, `src/pages/Index.tsx:103-113`, `src/pages/Index.tsx:240-286`.
 
-### Flow 4: Sending a Message
+## Đồng bộ khi peer mới vào
+- Leader đẩy log ngay khi thấy peer mới (sau data channel open).
+- Heartbeat là AppendEntries rỗng, mang `leaderCommit` giúp followers apply commit.
+Tham chiếu: `src/utils/raft.ts:83-89`, `src/utils/raft.ts:297-303`.
 
+## Flush 20 messages (leader-only)
+- Khi số message ≥ 20, leader gọi API với 20 message đầu, rồi append entry xoá.
+Flow:
 ```
 ┌──────────────────────────────────────────────┐
-│ 1. User sends message                        │
-│    - Input text in chat                      │
-│    - Click send                              │
+│ 1. messages.length >= 20 (leader)            │
+│    - flushIfNeeded(messages)                 │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 2. WebRTCManager.broadcastMessage()          │
-│    - Iterate all connected peers             │
-│    - For each peer with open data channel    │
+│ 2. POST 20 message đầu tới API               │
+│    - VITE_FLUSH_ENDPOINT                     │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 3. Send via data channel                     │
-│    dataChannel.send(JSON.stringify({         │
-│      type: 'message',                        │
-│      message: 'Hello!'                       │
-│    }))                                       │
+│ 3. appendEntry({action:'delete-messages',ids})│
+│    - replicate + commit                      │
 └────────────────┬─────────────────────────────┘
                  │
 ┌────────────────▼─────────────────────────────┐
-│ 4. Remote peer receives message              │
-│    - Parse JSON                              │
-│    - Trigger onMessageCallback               │
-│    - Display in chat UI                      │
+│ 4. Tất cả peers filter xoá theo ids          │
 └──────────────────────────────────────────────┘
 ```
+Tham chiếu: `src/pages/Index.tsx:43-64`, `src/pages/Index.tsx:130-151`.
 
-### Flow 5: File Transfer
+## Chống split-brain
+- Chỉ `raft.addPeer()` sau khi data channel mở.
+- Hạ về Follower khi nhận AppendEntries hợp lệ từ leader khác.
+Tham chiếu: `src/pages/Index.tsx:120-127`, `src/utils/raft.ts:405-410`.
 
+## Lỗi thường gặp & kiểm tra
+- Tin nhắn đầu không sync: khởi tạo `commitIndex/lastApplied = -1` để entry index 0 được apply.
+  - `src/utils/raft.ts:43-49`.
+- Không có leader: cập nhật `leaderId` vào UI khi nhận AppendEntries/heartbeat.
+  - `src/utils/raft.ts:136-143`, `src/utils/raft.ts:405-410`, `src/pages/Index.tsx:117-126`.
+- Hai leader cùng lúc: hạ leader/candidate về follower khi nhận AppendEntries.
+  - `src/utils/raft.ts:405-410`.
+
+## Ghi chú cấu hình
+- Thời gian RAFT hiện tại:
 ```
-┌──────────────────────────────────────────────┐
-│ 1. User selects file to send                 │
-│    - Choose file via file input              │
-│    - Select target peer                      │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 2. Send file metadata                        │
-│    dataChannel.send(JSON.stringify({         │
-│      type: 'file-metadata',                  │
-│      fileName: 'photo.jpg',                  │
-│      fileSize: 524288,                       │
-│      fileType: 'image/jpeg'                  │
-│    }))                                       │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 3. Receiver stores metadata                  │
-│    - Create pendingFileData entry            │
-│    - Wait for binary data                    │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 4. Send file data                            │
-│    file.arrayBuffer().then(buffer => {       │
-│      dataChannel.send(buffer);               │
-│    })                                        │
-└────────────────┬─────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────┐
-│ 5. Receiver reconstructs file                │
-│    - Receive ArrayBuffer                     │
-│    - Create Blob from buffer + metadata      │
-│    - Trigger onFileCallback                  │
-│    - Display file/download link in UI        │
-└──────────────────────────────────────────────┘
+ELECTION_TIMEOUT_MIN = 1000ms
+ELECTION_TIMEOUT_MAX = 30000ms
+HEARTBEAT_INTERVAL   = 500ms
 ```
-
----
-
-## API Reference
-
-### WebRTCManager
-
-#### Constructor
-```typescript
-new WebRTCManager(localId: string)
-```
-
-#### Methods
-
-**Connection Management:**
-```typescript
-// Connect to signaling server and join room
-connectToCentrifugo(url: string, roomId: string, token?: string): Promise<void>
-
-// Disconnect from all peers and signaling
-disconnect(): void
-
-// Remove specific peer connection
-removePeer(peerId: string): void
-```
-
-**Media Management:**
-```typescript
-// Enable/disable video and audio
-enableVideo(enable: boolean): Promise<void>
-```
-
-**Messaging:**
-```typescript
-// Send text message to specific peer
-sendMessage(peerId: string, message: string): void
-
-// Send message to all connected peers
-broadcastMessage(message: string): void
-
-// Send file to specific peer
-sendFile(peerId: string, file: File): Promise<void>
-
-// Send RAFT message to specific peer
-sendRaftMessage(peerId: string, message: RaftMessage): void
-```
-
-**Event Callbacks:**
-```typescript
-setOnMessage(callback: (peerId: string, message: string) => void): void
-setOnFile(callback: (peerId: string, file: Blob, fileName: string, fileType: string) => void): void
-setOnPeerConnected(callback: (peerId: string) => void): void
-setOnPeerDisconnected(callback: (peerId: string) => void): void
-setOnStream(callback: (peerId: string, stream: MediaStream) => void): void
-setOnRaftMessage(callback: (peerId: string, message: RaftMessage) => void): void
-```
-
----
-
-### RaftManager
-
-#### Constructor
-```typescript
-new RaftManager(nodeId: string)
-```
-
-#### Methods
-
-**Peer Management:**
-```typescript
-// Add new peer to cluster
-addPeer(peerId: string): void
-
-// Remove peer from cluster
-removePeer(peerId: string): void
-```
-
-**Message Handling:**
-```typescript
-// Process incoming RAFT message
-handleMessage(message: RaftMessage): void
-```
-
-**State Queries:**
-```typescript
-// Get current node state
-getState(): NodeState  // 'follower' | 'candidate' | 'leader'
-
-// Get current leader ID
-getLeaderId(): string | null
-
-// Check if this node is the leader
-isLeader(): boolean
-```
-
-**Event Callbacks:**
-```typescript
-// Callback when RAFT message needs to be sent
-setOnSendMessage(callback: (peerId: string, message: RaftMessage) => void): void
-
-// Callback when state changes
-setOnStateChange(callback: (state: NodeState, leaderId: string | null) => void): void
-```
-
-**Cleanup:**
-```typescript
-// Stop all timers and cleanup
-cleanup(): void
-```
-
----
-
-## Configuration
-
-### Timing Parameters
-
-You can adjust these constants in `src/utils/raft.ts`:
-
-```typescript
-// Election timeout range (randomized)
-private readonly ELECTION_TIMEOUT_MIN = 1000;   // 1s
-private readonly ELECTION_TIMEOUT_MAX = 30000;  // 30s
-
-// Heartbeat interval (AppendEntries empty)
-private readonly HEARTBEAT_INTERVAL = 500;      // 0.5s
-```
-
-**Guidelines:**
-- `HEARTBEAT_INTERVAL` should be significantly less than `ELECTION_TIMEOUT_MIN`
-- Longer timeouts = more stable but slower failover
-- Shorter timeouts = faster failover but more elections
-- Random range prevents simultaneous elections
-
-### WebRTC Configuration
-
-ICE servers are configured in `src/utils/webrtc.ts`:
-
-```typescript
-iceServers: [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' }
-]
-```
-
-For production, consider adding TURN servers for NAT traversal.
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. **Peer stays in Candidate state**
-- **Cause**: Not receiving votes from majority
-- **Check**: Are peers actually connected via WebRTC?
-- **Check**: Are data channels open?
-- **Fix**: Ensure `addPeer()` is called after data channel opens
-
-#### 2. **Multiple leaders elected**
-- **Cause**: Split-brain (elections before data channel/RAFT ready)
-- **Check**: Add RAFT peers only after data channel opens
-- **Fix**: Step down to follower on valid AppendEntries from another leader (term ≥ current)
-
-#### 3. **Files not receiving**
-- **Cause**: Data channel buffer overflow or metadata mismatch
-- **Check**: File size and data channel buffer
-- **Fix**: Implement chunking for large files
-
-#### 4. **Frequent elections**
-- **Cause**: Heartbeats not reaching followers
-- **Check**: Network latency and heartbeat interval
-- **Fix**: Increase election timeout or decrease heartbeat interval
-
----
-
-## Best Practices
-
-1. **Always cleanup on unmount**
-   ```typescript
-   useEffect(() => {
-     return () => {
-       webrtcManager.disconnect();
-       raftManager.cleanup();
-     };
-   }, []);
-   ```
-
-2. **Check leader before coordinated actions**
-   ```typescript
-   if (raftManager.isLeader()) {
-     // Only leader performs this action
-   }
-   ```
-
-3. **Handle state transitions**
-   ```typescript
-   raftManager.setOnStateChange((state, leaderId) => {
-     console.log(`State changed to ${state}, leader: ${leaderId}`);
-     // Update UI or trigger actions based on new state
-   });
-   ```
-
-4. **Graceful degradation**
-   - System should work with 1 peer (auto-leader)
-   - Handle network disconnections gracefully
-   - Retry mechanisms for failed connections
-
----
-
-## Log Replication and Data Recovery
-
-### Overview
-
-The RAFT implementation includes full log replication to ensure data persists across leader changes. When a leader fails and a new leader is elected, the system automatically synchronizes all peers with the latest committed data.
-
-### Log Entry Structure
-
-```typescript
-interface LogEntry {
-  term: number;      // Term when entry was created
-  index: number;     // Position in the log
-  data: any;         // Application data (messages, files, etc.)
-  timestamp: number; // When entry was created
-}
-```
-
-### How It Works
-
-1. **Leader Appends Data**
-   - Application calls `raftManager.appendEntry(data)`
-   - Leader creates a log entry with current term and index
-   - Immediately replicates to all followers
-
-2. **Replication Process**
-   - Leader sends append-entries RPC to each follower
-   - Includes previous log index/term for consistency check
-   - Followers validate and append entries to their log
-
-3. **Commitment**
-   - Once majority of nodes have replicated an entry, it's committed
-   - Leader updates commitIndex and notifies followers
-   - Committed entries are applied to application state
-
-4. **Leader Change Recovery**
-   - New leader has the most up-to-date log
-   - Sends append-entries to synchronize all followers
-   - Followers with missing entries receive them automatically
-   - Conflicting entries are overwritten with leader's version
-
-### Usage Example
-
-```typescript
-// Set up log entry callback
-raftManager.setOnLogEntry((entry: LogEntry) => {
-  console.log('Applying committed entry:', entry.data);
-  // Update your application state here
-  // e.g., add message to chat, update file list, etc.
-});
-
-// Set up resync callback (optional)
-raftManager.setOnNeedResync((fromIndex: number) => {
-  console.log('Need to resync from index:', fromIndex);
-  // Request missing data if needed
-});
-
-// Append data (only works if this node is leader)
-if (raftManager.isLeader()) {
-  raftManager.appendEntry({
-    type: 'message',
-    content: 'Hello World',
-    sender: peerId
-  });
-}
-
-// Get current log state
-const log = raftManager.getLog();
-const commitIndex = raftManager.getCommitIndex();
-```
-
-### Recovery Guarantees
-
-- **Durability**: Once committed, data survives leader failures
-- **Consistency**: All nodes eventually have same log in same order
-- **Automatic Sync**: New leader synchronizes followers automatically
-- **No Data Loss**: Committed entries are never lost
-
----
-
-## Future Enhancements
-
-Potential improvements to consider:
-
-1. **Persistent Storage**
-   - Save log to localStorage/IndexedDB
-   - Survive browser refresh
-   - Support log compaction/snapshots
-
-2. **Enhanced Security**
-   - Encrypt data channel messages
-   - Authenticate RAFT messages
-   - Verify peer identities
-
-3. **Optimistic File Transfer**
-   - Chunk large files
-   - Progress callbacks
-   - Resumable transfers
-
-4. **Performance Monitoring**
-   - Track election frequency
-   - Monitor heartbeat latency
-   - Log state transitions
-
----
-
-## License & Credits
-
-This implementation is based on the RAFT consensus algorithm as described in the paper:
-"In Search of an Understandable Consensus Algorithm" by Diego Ongaro and John Ousterhout.
-
-WebRTC implementation follows standard WebRTC API specifications.
+Tham chiếu: `src/utils/raft.ts:57-59`.

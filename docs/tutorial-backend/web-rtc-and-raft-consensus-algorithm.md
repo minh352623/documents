@@ -762,29 +762,105 @@ For production, consider adding TURN servers for NAT traversal.
 
 ---
 
+## Log Replication and Data Recovery
+
+### Overview
+
+The RAFT implementation includes full log replication to ensure data persists across leader changes. When a leader fails and a new leader is elected, the system automatically synchronizes all peers with the latest committed data.
+
+### Log Entry Structure
+
+```typescript
+interface LogEntry {
+  term: number;      // Term when entry was created
+  index: number;     // Position in the log
+  data: any;         // Application data (messages, files, etc.)
+  timestamp: number; // When entry was created
+}
+```
+
+### How It Works
+
+1. **Leader Appends Data**
+   - Application calls `raftManager.appendEntry(data)`
+   - Leader creates a log entry with current term and index
+   - Immediately replicates to all followers
+
+2. **Replication Process**
+   - Leader sends append-entries RPC to each follower
+   - Includes previous log index/term for consistency check
+   - Followers validate and append entries to their log
+
+3. **Commitment**
+   - Once majority of nodes have replicated an entry, it's committed
+   - Leader updates commitIndex and notifies followers
+   - Committed entries are applied to application state
+
+4. **Leader Change Recovery**
+   - New leader has the most up-to-date log
+   - Sends append-entries to synchronize all followers
+   - Followers with missing entries receive them automatically
+   - Conflicting entries are overwritten with leader's version
+
+### Usage Example
+
+```typescript
+// Set up log entry callback
+raftManager.setOnLogEntry((entry: LogEntry) => {
+  console.log('Applying committed entry:', entry.data);
+  // Update your application state here
+  // e.g., add message to chat, update file list, etc.
+});
+
+// Set up resync callback (optional)
+raftManager.setOnNeedResync((fromIndex: number) => {
+  console.log('Need to resync from index:', fromIndex);
+  // Request missing data if needed
+});
+
+// Append data (only works if this node is leader)
+if (raftManager.isLeader()) {
+  raftManager.appendEntry({
+    type: 'message',
+    content: 'Hello World',
+    sender: peerId
+  });
+}
+
+// Get current log state
+const log = raftManager.getLog();
+const commitIndex = raftManager.getCommitIndex();
+```
+
+### Recovery Guarantees
+
+- **Durability**: Once committed, data survives leader failures
+- **Consistency**: All nodes eventually have same log in same order
+- **Automatic Sync**: New leader synchronizes followers automatically
+- **No Data Loss**: Committed entries are never lost
+
+---
+
 ## Future Enhancements
 
 Potential improvements to consider:
 
-1. **RAFT Log Replication**
-   - Implement append-entries for state machine replication
-   - Ensure all peers maintain consistent state
+1. **Persistent Storage**
+   - Save log to localStorage/IndexedDB
+   - Survive browser refresh
+   - Support log compaction/snapshots
 
-2. **Persistent State**
-   - Store term and voted-for in localStorage
-   - Survive page refreshes
+2. **Enhanced Security**
+   - Encrypt data channel messages
+   - Authenticate RAFT messages
+   - Verify peer identities
 
 3. **Optimistic File Transfer**
    - Chunk large files
    - Progress callbacks
    - Resumable transfers
 
-4. **Enhanced Security**
-   - Encrypt data channel messages
-   - Authenticate RAFT messages
-   - Verify peer identities
-
-5. **Performance Monitoring**
+4. **Performance Monitoring**
    - Track election frequency
    - Monitor heartbeat latency
    - Log state transitions

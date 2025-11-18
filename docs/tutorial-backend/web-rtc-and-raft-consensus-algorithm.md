@@ -369,3 +369,5 @@ const commitIndex = raftManager.getCommitIndex();
 
 ## 12. Giấy phép & ghi công
 Dựa trên RAFT (Diego Ongaro, John Ousterhout). WebRTC theo chuẩn API của trình duyệt.
+- [Raft — Trang chủ](https://raft.github.io/)
+- [WebRTC — Samples](https://webrtc.github.io/samples/)

@@ -206,5 +206,6 @@ auth/
     └── persistence/    # Database implementations
 ```
 
-
-https://uniknow.github.io/AgileDev/site/0.1.8-SNAPSHOT/parent/ddd/core/services
+## Tài nguyên tham khảo
+- Uniknow: https://uniknow.github.io/AgileDev/site/0.1.8-SNAPSHOT/parent/ddd/core/services
+- Git: https://github.com/minh352623/GO-DDD

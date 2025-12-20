@@ -6,7 +6,7 @@ description: Optimize CPU
 # Tối ưu hóa hiệu năng: Chiến lược sử dụng Local Cache vs Redis
 
 ## 1. Tổng quan & Bối cảnh
-Trong quá trình Stress Test với **2000 CCU**, chúng tôi nhận thấy sự chênh lệch lớn về mức tiêu thụ CPU giữa hai cách triển khai cache:
+Trong quá trình Stress Test với **2000 CCU** trong **20 phút** với hơn **1 triệu request**, chúng tôi nhận thấy sự chênh lệch lớn về mức tiêu thụ CPU giữa hai cách triển khai cache:
 *   **Cách cũ (11 CPU):** Áp dụng tư duy xử lý của Redis vào Local Cache.
 *   **Cách mới (8.2 CPU):** Tận dụng đúng sức mạnh của Local Cache.
 

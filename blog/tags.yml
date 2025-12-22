@@ -12,7 +12,10 @@ docusaurus:
   label: Docusaurus
   permalink: /docusaurus
   description: Docusaurus tag description
-
+clean_code:
+  label: Clean Code
+  permalink: /clean_code
+  description: Clean Code tag description
 hola:
   label: Hola
   permalink: /hola

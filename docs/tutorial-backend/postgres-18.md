@@ -183,5 +183,7 @@ Trong tương lai, cộng đồng đang hướng tới những bước tiến xa
 ## Nguồn tham khảo
 
 *   [PostgreSQL 18 RETURNING Enhancements: A Game Changer for Modern Applications](https://www.pgedge.com/blog/postgresql-18-returning-enhancements-a-game-changer-for-modern-applications)
+*   [Ví dụ minh họa (GitHub)](https://github.com/minh352623/example-posstgres-18)
+
 
 

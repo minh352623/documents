@@ -443,3 +443,9 @@ Trước khi copy code từ AI vào dự án, member phải tự kiểm tra lạ
 3.  **Performance**: Các Slice/Map có được `make` với capacity trước không?
 4.  **Interfaces**: Hàm có đang trả về struct cụ thể (concrete type) thay vì interface không?
 5.  **Logging**: Có dùng `slog` với đầy đủ key-value không?
+
+---
+
+## 6. Tài nguyên & Source Code
+
+*   **Example Repository**: [https://github.com/minh352623/golang-best-practies/tree/main](https://github.com/minh352623/golang-best-practies/tree/main)

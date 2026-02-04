@@ -383,7 +383,93 @@ type User struct {
     Password  string `json:"-"`
 }
 ```
+## 10. API Response Standard (RESTful & Clean Code)
 
+### 10.1. Standard Response Format
+Thống nhất cấu trúc JSON trả về cho toàn bộ API để Frontend dễ dàng tích hợp và xử lý thống nhất.
+
+**Success Response Structure:**
+```go
+type Response struct {
+    Data    interface{} `json:"data,omitempty"`    // Dữ liệu chính trả về
+    Meta    interface{} `json:"meta,omitempty"`    // Metadata (pagination info...)
+    Message string      `json:"message,omitempty"` // Thông báo thành công (nếu cần)
+}
+```
+
+**Error Response Structure:**
+```go
+type ErrorResponse struct {
+    Code    string      `json:"code"`              // Mã lỗi machine-readable (VD: USER_NOT_FOUND)
+    Message string      `json:"message"`           // Thông báo lỗi readable cho user/dev
+    Details interface{} `json:"details,omitempty"` // Chi tiết lỗi (VD: danh sách field validation fail)
+}
+```
+
+### 10.2. HTTP Status Codes
+Sử dụng đúng HTTP Status Code theo ngữ nghĩa RESTful. **Tuyệt đối không** trả về `200 OK` kèm `error code` bên trong body cho các lỗi client/server thực sự.
+
+*   **2xx Success**
+    *   `200 OK`: Request thành công (GET, PUT, PATCH).
+    *   `201 Created`: Tạo mới resource thành công (POST).
+    *   `204 No Content`: Xử lý thành công nhưng không trả về dữ liệu (DELETE hoặc POST async).
+
+*   **4xx Client Error**
+    *   `400 Bad Request`: Input sai định dạng, thiếu param bắt buộc, sai kiểu dữ liệu.
+    *   `401 Unauthorized`: Chưa xác thực (thiếu token, token hết hạn/không hợp lệ).
+    *   `403 Forbidden`: Đã xác thực nhưng không có quyền truy cập resource.
+    *   `404 Not Found`: Resource không tồn tại.
+    *   `422 Unprocessable Entity`: Input đúng định dạng nhưng sai logic nghiệp vụ (VD: email trùng, số dư không đủ).
+
+*   **5xx Server Error**
+    *   `500 Internal Server Error`: Lỗi không mong muốn từ phía server/database.
+
+### 10.3. Centralized Response Handling
+Hạn chế việc construct JSON thủ công trong Controller/Handler. Nên xây dựng package `response` riêng.
+
+```go
+// ❌ Incorrect: Duplicate logic, magic numbers, format không đồng nhất
+func (h *UserHandler) GetByID(c *gin.Context) {
+    user, err := h.service.GetUser(c, id)
+    if err != nil {
+        c.JSON(500, gin.H{"error": err.Error()}) // Lộ internal error message
+        return
+    }
+    c.JSON(200, user)
+}
+
+// ✅ Correct: Code sạch, thống nhất format và status code
+func (h *UserHandler) GetByID(c *gin.Context) {
+    user, err := h.service.GetUser(c, id)
+    if err != nil {
+        response.Error(c, err) // Tự động map error -> HTTP status & Standard Error JSON
+        return
+    }
+    response.Success(c, user)
+}
+```
+
+### 10.4. Error Mapping Layer
+Logic map từ lỗi nội bộ (Service/Domain) sang HTTP Status Code phải nằm ở tầng **Transport (HTTP Handler/Middleware)**.
+
+*   **Service Layer**: Chỉ trả về Go `error` chuẩn hoặc sentinel errors (VD: `domain.ErrNotFound`, `domain.ErrEmailExists`). **Không** phụ thuộc vào package `net/http` hay `gin`.
+*   **Helper/Handler**: Switch case trên error của service để quyết định status code.
+
+```go
+// Trong package response/error handling
+func MapErrorToStatus(err error) int {
+    switch {
+    case errors.Is(err, domain.ErrNotFound):
+        return http.StatusNotFound
+    case errors.Is(err, domain.ErrEmailExists):
+        return http.StatusConflict
+    case errors.Is(err, domain.ErrInvalidInput):
+        return http.StatusBadRequest
+    default:
+        return http.StatusInternalServerError
+    }
+}
+```
 ---
 
 # HƯỚNG DẪN: SỬ DỤNG GOLANG BEST PRACTICES KHI TƯƠNG TÁC VỚI AI

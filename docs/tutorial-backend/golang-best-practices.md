@@ -470,6 +470,120 @@ func MapErrorToStatus(err error) int {
     }
 }
 ```
+## 11. Quy Chuẩn Giao Tiếp Liên Module (Inter-Module Communication)
+
+Tài liệu này hướng dẫn cách truy xuất dữ liệu từ module khác trong kiến trúc Monolith của Project Test, đảm bảo tính **Loosely Coupled** (rời rạc) và sẵn sàng để tách thành **Microservice** bất cứ lúc nào mà không phải sửa đổi Logic nghiệp vụ.
+
+### 11.1. Vấn Đề (The Problem)
+
+Trong kiến trúc Monolith, chúng ta thường có xu hướng import trực tiếp Repository hoặc Service từ module khác:
+
+```go
+// internal/mails/application/service/mail.service.impl.go
+
+import settingsRepo "github.com/.../internal/settings/domain/repository" // ❌ Phụ thuộc trực tiếp
+
+type mailService struct {
+    templateRepo settingsRepo.EmailTemplateRepository
+}
+```
+
+**Hệ quả:**
+1. **Chặt chẽ (High Coupling):** Module Mails bị buộc chặt vào module Settings.
+2. **Khó Scale:** Nếu Settings tách thành Microservice, code của Mails sẽ bị lỗi (vì Repo không còn database local).
+3. **Khó Test:** Unit test của Mails phải mock cả thành phần của Settings.
+
+### 11.2. Giải Pháp: Interface + Adapter Pattern
+
+Chúng ta áp dụng nguyên lý **Dependency Inversion Principle (DIP)**: "Phụ thuộc vào trừu tượng, không phụ thuộc vào cụ thể".
+
+#### Kiến trúc 3 lớp:
+1. **Consumer (Mails Module):** Định nghĩa một `Interface` mô tả những gì nó CẦN.
+2. **Implementation (Adapter):** Thực thi Interface đó bằng kỹ thuật cụ thể (DB query, API call).
+3. **Initializer:** "Tiêm" (Inject) bản thực thi phù hợp vào Service.
+
+### 11.3. Cấu Trúc Thư Mục Chuẩn
+
+Mỗi module khi cần dữ liệu từ bên ngoài nên tổ chức như sau:
+
+```text
+internal/mails/
+├── domain/
+│   └── repository/
+│       └── template_reader.go    # 🟢 [Interface] Mails cần đọc template
+├── infrastructure/
+│   └── adapter/
+│       ├── local_adapter.go      # 🔵 [Impl] Lấy từ module Settings local
+│       ├── http_adapter.go       # 🟠 [Impl] Lấy qua REST API (Microservice)
+│       └── cached_adapter.go     # 🟡 [Optional] Thêm cache layer
+```
+
+### 11.4. Ví Dụ Thực Tế (Mails & Settings)
+
+#### Bước 1: Định nghĩa Interface tại Domain Layer (của Mails)
+
+Interface này mô tả nhu cầu của Mails module, hoàn toàn độc lập với module Settings.
+
+```go
+// internal/mails/domain/repository/template_reader.go
+type TemplateInfo struct {
+    ID      int64
+    Subject string
+    Content string
+}
+
+type TemplateReader interface {
+    GetByID(ctx context.Context, id int64) (*TemplateInfo, error)
+}
+```
+
+#### Bước 2: Tạo Adapter tại Infrastructure Layer
+
+**Local Adapter (Dùng cho Monolith)**
+Adapter này gọi trực tiếp Repository của Settings.
+
+```go
+// internal/mails/infrastructure/adapter/local_adapter.go
+type LocalTemplateAdapter struct {
+    settingsRepo settingsRepo.EmailTemplateRepository
+}
+
+func (a *LocalTemplateAdapter) GetByID(...) (*TemplateInfo, error) {
+    t, _ := a.settingsRepo.GetById(ctx, id)
+    return &TemplateInfo{ID: t.Id, ...}, nil // Map data sang DTO của Mails
+}
+```
+
+**HTTP Adapter (Sẵn sàng cho Microservice)**
+Khi tách service, chỉ cần viết thêm Adapter này, KHÔNG sửa MailService.
+
+```go
+// internal/mails/infrastructure/adapter/http_template_adapter.go
+type HTTPTemplateAdapter struct {
+    baseURL string
+}
+
+func (a *HTTPTemplateAdapter) GetByID(...) (*TemplateInfo, error) {
+    resp, _ := http.Get(a.baseURL + "/templates/" + id)
+    // Parse JSON sang TemplateInfo
+}
+```
+
+### 11.5. Chiến Lược Dịch Chuyển (Microservice Readiness)
+
+Khi module Settings được tách ra:
+1. **Bước 1:** Viết `HTTPTemplateAdapter` gọi API của Settings Service.
+2. **Bước 2:** Cập nhật file `initialize/mails/mail.go` để chuyển từ `LocalTemplateAdapter` sang `HTTPTemplateAdapter`.
+3. **Kết quả:** Code logic trong `mail.service.impl.go` vẫn giữ nguyên 100%.
+
+### 11.6. 5 Quy Tắc Vàng cho Team
+
+> [!IMPORTANT]
+> 1. **Consumer sở hữu Interface:** Interface `TemplateReader` phải nằm trong package của Mails, không phải Settings.
+> 2. **Không Leak Entity:** Tránh trả về Entity của Settings qua Interface. Hãy dùng DTO đơn giản (như `TemplateInfo`).
+> 3. **Adapter nằm ở Infra Layer:** Mọi logic về cách lấy dữ liệu (DB, API, gRPC) phải đóng gói trong `infrastructure/adapter/`.
+> 4. **Dependency Injection:** Service chỉ nhận Interface qua Constructor.
+> 5. **Mapping:** Luôn luôn có bước mapping dữ liệu từ nguồn (Settings) sang định dạng module hiện tại (Mails) cần.
 ---
 
 # HƯỚNG DẪN: SỬ DỤNG GOLANG BEST PRACTICES KHI TƯƠNG TÁC VỚI AI

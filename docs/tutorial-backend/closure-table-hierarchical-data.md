@@ -117,7 +117,7 @@ SELECT 5, 5, 0;      -- Thêm quan hệ tự thân
 > [!IMPORTANT]
 > Closure Table đánh đổi không gian lưu trữ lấy tốc độ. Việc tốn thêm dung lượng để đổi lấy tốc độ phản hồi O(1) là một sự đầu tư xứng đáng cho hệ thống lớn.
 
-### Lời khuyên chuyên gia (The Hybrid Approach)
+### Lời khuyên (The Hybrid Approach)
 Trong các hệ thống Enterprise, bạn không nhất thiết phải chọn một. Kiến trúc sư giỏi thường:
 1.  Sử dụng **Adjacency List** làm "Source of Truth" để đảm bảo tốc độ ghi và tính toàn vẹn.
 2.  Duy trì một **Closure Table** như một "Materialized View" để phục vụ các truy vấn đọc/lọc phức tạp.

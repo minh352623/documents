@@ -87,7 +87,7 @@ const config: Config = {
         },
         {to: '/blog', label: 'Blog', position: 'left'},
         {
-          href: 'https://github.com/facebook/docusaurus',
+          href: 'https://github.com/minh352623/documents.git',
           label: 'GitHub',
           position: 'right',
         },
@@ -143,6 +143,23 @@ const config: Config = {
       darkTheme: prismThemes.dracula,
     },
   } satisfies Preset.ThemeConfig,
+  plugins: [
+    () => ({
+      name: 'resolve-raw-loader',
+      configureWebpack() {
+        return {
+          module: {
+            rules: [
+              {
+                resourceQuery: /raw/,
+                type: 'asset/source',
+              },
+            ],
+          },
+        };
+      },
+    }),
+  ],
 };
 
 export default config;

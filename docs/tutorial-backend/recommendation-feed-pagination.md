@@ -1,3 +1,9 @@
+---
+sidebar_position: 17
+title: Cơ Chế Load Data Trong Hệ Thống Recommendation Video
+description: Cơ Chế Load Data Trong Hệ Thống Recommendation Video
+---
+
 # Cơ Chế Load Data Trong Hệ Thống Recommendation Video: Khi User Lướt Hết Danh Sách
 
 > **Vấn đề thực tế**: Document mô tả luồng `User → Backend → AI Service → video IDs → FE`, nhưng **điều gì xảy ra khi user lướt hết batch 20 video đó?** Bài viết này giải thích cơ chế hoàn chỉnh mà các hệ thống như TikTok, YouTube Shorts áp dụng.

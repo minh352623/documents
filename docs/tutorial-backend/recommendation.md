@@ -6,7 +6,7 @@ Hệ thống recommendation được thiết kế để gợi ý video phù hợ
 
 ## Database Schema Tổng quan
 
-Hệ thống sử dụng 4 bảng chính:
+Hệ thống sử dụng 5 bảng chính:
 
 | Bảng | Database | Mục đích | Các trường chính |
 |------|----------|----------|------------------|
@@ -14,9 +14,10 @@ Hệ thống sử dụng 4 bảng chính:
 | **watch_sessions** | ClickHouse | Tổng hợp từ playback_events thành các phiên xem hoàn chỉnh với metrics chi tiết | `session_id`, `user_id`, `video_id`, `started_at`, `ended_at`, `total_watch_time_ms`, `is_finished`, `video_duration_ms`, `effective_watch_time_ms`, `num_pauses`, `num_resumes`, `num_replays`, `scrolled_in`, `scrolled_out`, `exit_reason`, `watch_time_ratio`, `is_valid_view` |
 | **users** | PostgreSQL | Lưu thông tin người dùng và preferences | `user_id`, `created_at`, `age`, `gender`, `language`, `interested_categories`, `avg_daily_watch_time_ms`, `device_type`, `preferred_creators`, `engagement_score`, `region` |
 | **videos** | PostgreSQL | Metadata của videos | `video_id`, `creator_id`, `upload_time`, `duration_ms`, `category`, `tags`, `language`, `sound_id`, `thumbnail_url`, `is_trending`, `peertube_uuid` |
+| **video_metadata** | ClickHouse | Metadata mở rộng cho video: ngôn ngữ, quốc gia — phục vụ training model và filter theo vùng/ngôn ngữ | `video_id`, `language`, `country` |
 
 **Lý do chọn database**:
-- **ClickHouse** cho events & sessions: Dữ liệu rất lớn, cần tốc độ ghi cao, độ nén tốt, query analytics nhanh
+- **ClickHouse** cho events, sessions & video_metadata: Dữ liệu rất lớn, cần tốc độ ghi cao, độ nén tốt, query analytics nhanh. Bảng `video_metadata` được đặt trên ClickHouse để JOIN trực tiếp với `watch_sessions`/`playback_events` khi training model mà không cần cross-database query.
 - **PostgreSQL** cho users & videos: Dữ liệu nhỏ-vừa, ít thay đổi, cần ACID compliance và tính ổn định
 
 ## Kiến trúc tổng thể
@@ -388,7 +389,72 @@ if __name__ == "__main__":
         time.sleep(60)
 ```
 
-#### 2.3. PostgreSQL: Users & Videos Metadata
+#### 2.3. ClickHouse: Video Metadata
+
+**Mục đích**: Lưu trữ metadata mở rộng của video (ngôn ngữ, quốc gia) trên ClickHouse để phục vụ training model và filter recommendation theo vùng/ngôn ngữ. Bảng này tách biệt khỏi PostgreSQL `videos` table vì cần JOIN trực tiếp với `watch_sessions` và `playback_events` trong quá trình training — tránh cross-database query.
+
+**Đặc điểm dữ liệu**:
+- Dữ liệu tĩnh, ít thay đổi (sync từ PostgreSQL `videos` table hoặc từ pipeline upload video)
+- Cần JOIN nhanh với `playback_events` và `watch_sessions` trên cùng ClickHouse
+- Hỗ trợ filter khi training model và khi serving recommendation
+- **Khuyến nghị: ClickHouse** (cùng cluster với events data)
+
+**Schema**:
+```sql
+CREATE TABLE video_metadata (
+    video_id String COMMENT 'Video ID, khớp với videos.video_id trên PostgreSQL',
+    language String COMMENT 'Ngôn ngữ của video (vi, en, ja, ko, etc.)',
+    country String COMMENT 'Quốc gia xuất xứ hoặc target audience (VN, US, JP, etc.)',
+    updated_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY video_id
+SETTINGS index_granularity = 8192;
+```
+
+**Lưu ý**:
+- Sử dụng `ReplacingMergeTree` để tự động deduplicate khi cùng `video_id` được insert nhiều lần (ví dụ update language/country)
+- Dữ liệu có thể được sync từ PostgreSQL bằng cronjob hoặc CDC (Change Data Capture)
+
+**Sync từ PostgreSQL**:
+```python
+def sync_video_metadata_to_clickhouse():
+    """
+    Cronjob: Sync video metadata từ PostgreSQL sang ClickHouse.
+    Chạy mỗi giờ hoặc trigger khi có video mới.
+    """
+    # Lấy videos đã thay đổi từ PostgreSQL
+    videos = pg_cursor.execute("""
+        SELECT video_id, language, country
+        FROM videos
+        WHERE updated_at >= NOW() - INTERVAL '1 hour'
+    """)
+    rows = pg_cursor.fetchall()
+
+    if rows:
+        ch_client.execute(
+            'INSERT INTO video_metadata (video_id, language, country) VALUES',
+            [(r[0], r[1] or 'unknown', r[2] or 'unknown') for r in rows]
+        )
+        print(f"Synced {len(rows)} video metadata records to ClickHouse")
+```
+
+**Ví dụ query kết hợp với watch_sessions**:
+```sql
+-- Lấy watch behavior theo ngôn ngữ video
+SELECT
+    vm.language,
+    vm.country,
+    count() as total_views,
+    avg(ws.watch_time_ratio) as avg_completion,
+    countIf(ws.is_finished = true) as finished_count
+FROM watch_sessions ws
+INNER JOIN video_metadata vm ON ws.video_id = vm.video_id
+WHERE ws.started_at >= now() - INTERVAL 30 DAY
+GROUP BY vm.language, vm.country
+ORDER BY total_views DESC;
+```
+
+#### 2.4. PostgreSQL: Users & Videos Metadata
 
 **Mục đích**: Lưu trữ metadata về users và videos.
 
@@ -600,6 +666,14 @@ def extract_video_features(video_id: str) -> dict:
         FROM videos
         WHERE video_id = '{video_id}'
     """)
+
+    # From ClickHouse video_metadata - language & country for filtering/training
+    video_metadata_ch = ch_client.execute(f"""
+        SELECT language, country
+        FROM video_metadata
+        WHERE video_id = '{video_id}'
+        LIMIT 1
+    """)
     
     if not video_meta:
         return None
@@ -667,7 +741,10 @@ def extract_video_features(video_id: str) -> dict:
         "save_count": inter[3],
         # Calculated metrics
         "retention_rate": eng[7] / eng[1] if eng[1] > 0 else 0,
-        "engagement_rate": (inter[0] + inter[1] + inter[2]) / eng[1] if eng[1] > 0 else 0
+        "engagement_rate": (inter[0] + inter[1] + inter[2]) / eng[1] if eng[1] > 0 else 0,
+        # ClickHouse video_metadata features (for filtering & training)
+        "ch_language": video_metadata_ch[0][0] if video_metadata_ch else "unknown",
+        "ch_country": video_metadata_ch[0][1] if video_metadata_ch else "unknown"
     }
 ```
 
@@ -1448,6 +1525,12 @@ async def test_full_recommendation_flow():
 - Size/video: ~1 KB
 - Total: ~100 MB
 
+**video_metadata** (ClickHouse):
+- Records: 100K videos (mirror từ PostgreSQL)
+- Size/record: ~50 bytes
+- Total: ~5 MB (raw), ~1 MB (compressed)
+- Ghi chú: Rất nhỏ, nhưng đặt trên ClickHouse để JOIN nhanh khi training
+
 ### Optimization Tips
 
 1. **ClickHouse Partitioning**: Partition theo tháng cho dễ quản lý và drop old data
@@ -1465,6 +1548,6 @@ async def test_full_recommendation_flow():
 
 ---
 
-**Phiên bản**: 1.0.0  
-**Ngày cập nhật**: 2026-01-20  
+**Phiên bản**: 1.1.0  
+**Ngày cập nhật**: 2026-02-25  
 **Tác giả**: Development Team

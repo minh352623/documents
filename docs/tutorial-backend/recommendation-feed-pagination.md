@@ -79,11 +79,18 @@ AI generate sẵn 200 video IDs và lưu vào Redis. Backend chỉ việc pop ra
 ```python
 # Khi user mở app lần đầu hoặc pool hết
 async def initialize_feed_pool(user_id: str):
+    # Lấy thông tin user để filter theo language/country
+    user_profile = await get_user_profile(user_id)  # language, region từ PostgreSQL
+    
     # Gọi AI generate 200 video IDs một lần
+    # AI Service sẽ query video_metadata (ClickHouse) để filter/boost
+    # videos phù hợp với language & country của user
     video_ids = await ai_service.recommend(
         user_id=user_id,
         n=200,
-        exclude_ids=[]
+        exclude_ids=[],
+        preferred_language=user_profile.get("language", "vi"),
+        preferred_country=user_profile.get("region", "VN")
     )
     
     # Lưu vào Redis dạng List
@@ -262,17 +269,45 @@ class FeedManager {
 Dù hiếm gặp (user xem liên tục nhiều giờ), vẫn cần có fallback:
 
 ```python
-async def get_trending_fallback(limit: int, user_language: str = "vi"):
+async def get_trending_fallback(
+    limit: int, 
+    user_language: str = "vi", 
+    user_country: str = "VN"
+):
     """
-    Fallback khi pool AI hết: trả về trending videos
+    Fallback khi pool AI hết: trả về trending videos.
+    Sử dụng video_metadata trên ClickHouse để filter theo language/country,
+    sau đó cross-check với PostgreSQL cho trending status.
     """
-    trending = await db.query("""
-        SELECT video_id FROM videos
-        WHERE is_trending = TRUE
-        AND language = $1
-        ORDER BY upload_time DESC
-        LIMIT $2
-    """, user_language, limit * 3)
+    # Bước 1: Lấy video IDs phù hợp language/country từ ClickHouse video_metadata
+    filtered_video_ids = await ch_client.execute("""
+        SELECT video_id 
+        FROM video_metadata
+        WHERE language = %(lang)s OR country = %(country)s
+    """, {"lang": user_language, "country": user_country})
+    
+    filtered_ids = [row[0] for row in filtered_video_ids]
+    
+    if not filtered_ids:
+        # Nếu không có kết quả → fallback toàn bộ trending
+        filtered_ids = None
+    
+    # Bước 2: Lấy trending videos từ PostgreSQL, filter theo video IDs
+    if filtered_ids:
+        trending = await db.query("""
+            SELECT video_id FROM videos
+            WHERE is_trending = TRUE
+            AND video_id = ANY($1)
+            ORDER BY upload_time DESC
+            LIMIT $2
+        """, filtered_ids, limit * 3)
+    else:
+        trending = await db.query("""
+            SELECT video_id FROM videos
+            WHERE is_trending = TRUE
+            ORDER BY upload_time DESC
+            LIMIT $1
+        """, limit * 3)
     
     # Shuffle để không boring
     import random
@@ -280,6 +315,8 @@ async def get_trending_fallback(limit: int, user_language: str = "vi"):
     
     return trending[:limit]
 ```
+
+> **Ghi chú**: Bảng `video_metadata` trên ClickHouse chứa `video_id`, `language`, `country` — cho phép filter nhanh theo vùng/ngôn ngữ trước khi query PostgreSQL. Xem chi tiết schema tại [Hệ Thống Recommendation cho Video — Section 2.3](./recommendation#23-clickhouse-video-metadata).
 
 ---
 

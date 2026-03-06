@@ -1,0 +1,988 @@
+---
+slug: restful-api-design-guide
+title: RESTful API Design Standards & Guidelines
+authors: [min]
+tags: [rest, api_design, backend, best_practices, tech_lead]
+---
+
+🏗️ RESTful API Design Standards & Guidelines
+
+> **Version:** 1.0.0  
+> **Áp dụng cho:** Toàn bộ team backend — bắt buộc tuân thủ từ sprint tiếp theo
+
+Giới thiệu
+
+> [!IMPORTANT]
+> Document này là **nguồn sự thật duy nhất (single source of truth)** cho thiết kế API trong dự án.  
+> Mọi API mới phải được review theo checklist ở cuối document trước khi merge.
+
+Nội dung chính: 15 Tiêu Chuẩn Thiết Kế API RESTful
+
+
+--------------------------------------------------------------------------------
+
+## 1. Nguyên Tắc Cốt Lõi REST
+
+REST (Representational State Transfer) không phải một chuẩn cứng nhắc — đây là một tập hợp **ràng buộc kiến trúc**. Hiểu đúng 6 nguyên tắc này trước khi thiết kế bất kỳ API nào.
+
+### 6 Ràng buộc của REST
+
+| Ràng buộc | Ý nghĩa thực tế |
+|---|---|
+| **Client-Server** | Frontend và Backend độc lập nhau, chỉ giao tiếp qua interface |
+| **Stateless** | Mỗi request chứa đủ thông tin — server không lưu session client |
+| **Cacheable** | Response phải khai báo có thể cache được hay không |
+| **Uniform Interface** | Mọi resource đều có cấu trúc URL và response nhất quán |
+| **Layered System** | Client không biết đang nói chuyện với server thật hay proxy |
+| **Code on Demand** *(optional)* | Server có thể gửi code về client thực thi (ít dùng) |
+
+### Resource-Oriented Thinking
+
+> **Quy tắc vàng:** API của bạn phải mô tả **danh từ (resource)**, không phải **động từ (action)**.
+
+```
+❌ Tư duy RPC (sai trong REST):
+POST /getUser
+POST /createNewOrder
+POST /deleteProduct
+POST /updateUserProfile
+
+✅ Tư duy Resource (đúng trong REST):
+GET    /users/{id}
+POST   /orders
+DELETE /products/{id}
+PATCH  /users/{id}
+```
+
+---
+
+## 2. URL Design — Đặt Tên Endpoint
+
+### 2.1 Quy tắc cơ bản
+
+```
+✅ ĐÚNG                              ❌ SAI
+/users                               /getUsers
+/users/{id}                          /user/{id}          (dùng số nhiều)
+/users/{id}/orders                   /users/{id}/Orders  (chữ hoa)
+/product-categories                  /productCategories  (camelCase)
+/product-categories/{id}             /product_categories (underscore)
+/users/{id}/profile-picture          /users/{id}/profilePicture
+```
+
+**Quy tắc:**
+- ✅ Luôn dùng **lowercase**
+- ✅ Dùng **kebab-case** (`-`) cho multi-word: `/product-categories`
+- ✅ Dùng **số nhiều** cho collection: `/users`, `/orders`, `/products`
+- ✅ Dùng **danh từ**, không dùng động từ trong URL
+- ❌ Không dùng underscore `_`
+- ❌ Không dùng camelCase trong URL
+- ❌ Không có dấu `/` ở cuối: `/users/` → `/users`
+
+---
+
+### 2.2 Hierarchy — Quan hệ cha-con
+
+Dùng nested URL để thể hiện quan hệ ownership rõ ràng:
+
+```
+# User sở hữu Orders
+GET    /users/{userId}/orders              # Lấy tất cả orders của user
+GET    /users/{userId}/orders/{orderId}    # Lấy 1 order cụ thể của user
+POST   /users/{userId}/orders              # Tạo order cho user
+DELETE /users/{userId}/orders/{orderId}    # Xóa order của user
+
+# Course có nhiều Sections, Section có nhiều Lessons
+GET /courses/{courseId}/sections
+GET /courses/{courseId}/sections/{sectionId}/lessons
+GET /courses/{courseId}/sections/{sectionId}/lessons/{lessonId}
+```
+
+> [!WARNING]
+> **Không nest quá 3 cấp.** Nếu URL dài hơn `/resource/{id}/resource/{id}/resource`, hãy xem xét lại thiết kế.
+>
+> ```
+> ❌ Quá sâu — khó đọc, khó maintain:
+> /universities/{uniId}/departments/{deptId}/courses/{courseId}/sections/{sectionId}/lessons/{lessonId}
+>
+> ✅ Flatten khi resource có thể identify độc lập:
+> GET /lessons/{lessonId}   ← lessonId đã unique, không cần full path
+> ```
+
+---
+
+### 2.3 Actions không phải CRUD
+
+Đôi khi cần thực hiện action không map vào CRUD. Dùng sub-resource hoặc action endpoint:
+
+```
+# Thao tác trạng thái
+POST /orders/{id}/cancel          # Hủy đơn hàng
+POST /orders/{id}/confirm         # Xác nhận đơn hàng
+POST /users/{id}/deactivate       # Vô hiệu hóa user
+POST /users/{id}/password/reset   # Reset mật khẩu
+
+# Bulk operations
+POST /users/bulk-delete           # Xóa nhiều users cùng lúc
+POST /notifications/bulk-read     # Đánh dấu đọc nhiều thông báo
+
+# Đặc biệt: Auth không phải resource nên có thể dùng động từ
+POST /auth/login
+POST /auth/logout
+POST /auth/refresh-token
+POST /auth/verify-email
+```
+
+---
+
+## 3. HTTP Methods — Dùng Đúng Method
+
+### Bảng reference nhanh
+
+| Method | Mục đích | Idempotent | Body | Cache |
+|---|---|---|---|---|
+| `GET` | Lấy resource | ✅ | ❌ | ✅ |
+| `POST` | Tạo mới resource | ❌ | ✅ | ❌ |
+| `PUT` | Thay thế toàn bộ resource | ✅ | ✅ | ❌ |
+| `PATCH` | Cập nhật một phần resource | ❌ | ✅ | ❌ |
+| `DELETE` | Xóa resource | ✅ | ❌ | ❌ |
+| `HEAD` | Như GET nhưng không có body | ✅ | ❌ | ✅ |
+| `OPTIONS` | Kiểm tra methods được phép | ✅ | ❌ | ❌ |
+
+> **Idempotent** = Gọi nhiều lần cho kết quả giống nhau.  
+> `DELETE /users/1` gọi 10 lần → user vẫn bị xóa 1 lần. ✅  
+> `POST /orders` gọi 10 lần → tạo 10 orders. ❌
+
+---
+
+### PUT vs PATCH — Phân biệt rõ
+
+```json
+// Resource hiện tại:
+{
+  "id": "123",
+  "name": "Nguyen Van A",
+  "email": "a@gmail.com",
+  "age": 25,
+  "role": "student"
+}
+
+// PUT /users/123 — Thay thế TOÀN BỘ (phải gửi đủ tất cả fields)
+// Request body:
+{
+  "name": "Nguyen Van A",
+  "email": "new@gmail.com",
+  "age": 25,
+  "role": "student"       // ← Nếu không gửi field này → bị null/mất
+}
+
+// PATCH /users/123 — Cập nhật MỘT PHẦN (chỉ gửi fields cần đổi)
+// Request body:
+{
+  "email": "new@gmail.com"  // ← Chỉ update email, các field khác giữ nguyên
+}
+```
+
+> [!TIP]
+> Trong thực tế, **PATCH** được dùng nhiều hơn PUT vì an toàn hơn (không vô tình xóa data). Dùng **PUT** khi API của bạn là **replace operation** thực sự.
+
+---
+
+## 4. HTTP Status Codes — Trả Về Đúng Status
+
+### 4.1 Nhóm status codes
+
+```
+1xx — Informational  (hiếm dùng trong REST)
+2xx — Success        ← API trả về thường xuyên nhất
+3xx — Redirection    (thường do infrastructure xử lý)
+4xx — Client Error   ← Lỗi do client gửi sai
+5xx — Server Error   ← Lỗi do server
+```
+
+### 4.2 Status codes phổ biến — dùng đúng
+
+**2xx — Success**
+
+| Code | Tên | Khi nào dùng |
+|---|---|---|
+| `200 OK` | Success | GET, PUT, PATCH thành công |
+| `201 Created` | Created | POST tạo resource thành công |
+| `204 No Content` | No Content | DELETE thành công, không cần trả body |
+| `202 Accepted` | Accepted | Request nhận được nhưng xử lý async (background job) |
+
+**4xx — Client Error**
+
+| Code | Tên | Khi nào dùng |
+|---|---|---|
+| `400 Bad Request` | Bad Request | Dữ liệu gửi lên sai format, thiếu field required |
+| `401 Unauthorized` | Unauthorized | Chưa đăng nhập / token invalid |
+| `403 Forbidden` | Forbidden | Đã đăng nhập nhưng không có quyền |
+| `404 Not Found` | Not Found | Resource không tồn tại |
+| `409 Conflict` | Conflict | Trùng lặp dữ liệu (email đã tồn tại) |
+| `422 Unprocessable` | Unprocessable Entity | Business rule violation |
+| `429 Too Many Requests` | Too Many Requests | Vượt rate limit |
+
+**5xx — Server Error**
+
+| Code | Tên | Khi nào dùng |
+|---|---|---|
+| `500 Internal Server Error` | Server Error | Lỗi không mong muốn — bug |
+| `502 Bad Gateway` | Bad Gateway | Service phụ thuộc bị lỗi |
+| `503 Service Unavailable` | Unavailable | Server đang maintenance |
+
+---
+
+### 4.3 Lỗi thường gặp khi dùng status code
+
+```
+❌ Sai — Trả 200 cho mọi thứ rồi để error trong body:
+HTTP 200 OK
+{
+  "success": false,
+  "error": "User not found"
+}
+
+✅ Đúng — HTTP status phản ánh đúng tình huống:
+HTTP 404 Not Found
+{
+  "code": "USER_NOT_FOUND",
+  "message": "User with id '123' was not found"
+}
+
+---
+
+❌ Sai — Dùng 403 khi chưa login:
+HTTP 403 Forbidden   ← Sai! Chưa login thì phải 401
+
+✅ Đúng:
+HTTP 401 Unauthorized  ← Chưa xác thực
+HTTP 403 Forbidden     ← Đã xác thực nhưng không có quyền
+
+---
+
+❌ Sai — Dùng 400 cho mọi loại lỗi client:
+HTTP 400 Bad Request  ← Không rõ là lỗi gì
+
+✅ Đúng — Phân biệt rõ:
+HTTP 400  ← Input validation fail (sai format, thiếu field)
+HTTP 409  ← Business conflict (email đã tồn tại)
+HTTP 422  ← Business rule violation (số dư không đủ)
+```
+
+---
+
+## 5. Request Design — Input Chuẩn
+
+### 5.1 Request Headers bắt buộc
+
+```http
+POST /api/v1/users HTTP/1.1
+Host: api.example.com
+Content-Type: application/json          ← Luôn khai báo content type
+Authorization: Bearer {jwt_token}       ← Auth token
+Accept: application/json                ← Loại response muốn nhận
+X-Request-ID: uuid-v4-here             ← Dùng để trace request
+X-Client-Version: 1.2.3               ← Version của client (optional)
+```
+
+---
+
+### 5.2 Request Body — JSON conventions
+
+```json
+// ✅ Dùng camelCase cho JSON fields (khác với URL dùng kebab-case)
+{
+  "firstName": "Minh",
+  "lastName": "Tran",
+  "email": "minh@example.com",
+  "phoneNumber": "0368210752",
+  "dateOfBirth": "2001-02-11",          // ISO 8601 date
+  "createdAt": "2024-01-15T10:30:00Z",  // ISO 8601 datetime với timezone
+  "isActive": true,                      // boolean, không dùng 0/1
+  "roleId": "uuid-here",                // ID dùng UUID hoặc string
+  "metadata": {
+    "source": "mobile_app",
+    "version": "2.1.0"
+  }
+}
+
+// ❌ Sai:
+{
+  "first_name": "Minh",        // snake_case trong JSON
+  "created_at": "15/01/2024",  // Sai format date
+  "is_active": 1,              // Dùng số thay boolean
+  "role_id": 42                // ID là số nguyên (dễ đoán, không an toàn)
+}
+```
+
+---
+
+### 5.3 Path Parameters vs Query Parameters vs Body
+
+```
+Path Parameters    → Identify resource (bắt buộc, là một phần của resource)
+Query Parameters   → Filter, sort, paginate, search (optional)
+Request Body       → Data để tạo hoặc cập nhật resource
+
+Ví dụ phân biệt:
+
+GET /users/{id}                          ← id là path param (identify user)
+GET /users?role=admin&status=active      ← filter là query param
+GET /users?page=2&limit=20&sort=name     ← pagination là query param
+POST /users        { body: user data }   ← tạo user → data trong body
+PATCH /users/{id}  { body: updates }     ← update → id trong path, data trong body
+
+❌ Sai — đặt filter vào path:
+GET /users/active/admin    ← Không rõ ý nghĩa
+
+✅ Đúng — filter vào query param:
+GET /users?status=active&role=admin
+```
+
+---
+
+## 6. Response Design — Output Chuẩn
+
+### 6.1 Cấu trúc response thống nhất
+
+Toàn bộ API trong project **phải** dùng cấu trúc response này:
+
+```json
+// ✅ Success Response — Một object
+{
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "Nguyen Van A",
+    "email": "a@gmail.com",
+    "createdAt": "2024-01-15T10:30:00Z"
+  },
+  "message": "Success"
+}
+
+// ✅ Success Response — Danh sách với pagination
+{
+  "data": [
+    { "id": "1", "name": "User A" },
+    { "id": "2", "name": "User B" }
+  ],
+  "meta": {
+    "total": 150,
+    "page": 1,
+    "limit": 20,
+    "totalPages": 8,
+    "hasNext": true,
+    "hasPrev": false
+  },
+  "message": "Success"
+}
+
+// ✅ Success Response — POST tạo resource
+// HTTP 201 Created
+{
+  "data": {
+    "id": "newly-created-id",
+    "name": "New Resource"
+  },
+  "message": "Created successfully"
+}
+
+// ✅ Success Response — DELETE
+// HTTP 204 No Content
+// (Không có body)
+```
+
+---
+
+### 6.2 Naming conventions trong response
+
+```json
+{
+  "userId": "uuid",           // ✅ camelCase
+  "firstName": "Minh",        // ✅ camelCase
+  "createdAt": "ISO8601",     // ✅ Timestamp dùng suffix "At"
+  "updatedAt": "ISO8601",     // ✅
+  "deletedAt": null,          // ✅ null nếu chưa xóa
+  "isActive": true,           // ✅ boolean dùng prefix "is/has/can"
+  "hasPermission": false,     // ✅
+  "canEdit": true,            // ✅
+  "totalCount": 150,          // ✅ số dùng suffix "Count/Total/Amount"
+  "priceAmount": 99.99,       // ✅
+  "currency": "USD"           // ✅ enum value dùng UPPERCASE string
+}
+```
+
+---
+
+### 6.3 Không trả về thông tin nhạy cảm
+
+```json
+// ❌ Sai — trả về password hash, internal fields
+{
+  "id": "123",
+  "email": "a@gmail.com",
+  "password": "$2b$10$...",          // ← Không bao giờ trả password
+  "passwordResetToken": "abc123",    // ← Internal token
+  "internalNotes": "VIP customer",   // ← Internal data
+  "dbVersion": 3                     // ← Internal implementation detail
+}
+
+// ✅ Đúng — chỉ expose data cần thiết
+{
+  "id": "123",
+  "email": "a@gmail.com",
+  "name": "Nguyen Van A",
+  "createdAt": "2024-01-15T10:30:00Z"
+}
+```
+
+---
+
+## 7. Error Handling — Lỗi Có Cấu Trúc
+
+### 7.1 Error response format
+
+```json
+// Format chuẩn cho mọi loại lỗi:
+{
+  "code": "USER_NOT_FOUND",                    // Machine-readable error code
+  "message": "User with id '123' not found",   // Human-readable message
+  "details": null,                             // Chi tiết thêm (nếu có)
+  "path": "/api/v1/users/123",                 // Endpoint bị lỗi
+  "timestamp": "2024-01-15T10:30:00Z",         // Thời điểm xảy ra lỗi
+  "requestId": "req-uuid-here"                 // Để trace trong logs
+}
+
+// Validation error — có nhiều lỗi cùng lúc:
+// HTTP 400 Bad Request
+{
+  "code": "VALIDATION_ERROR",
+  "message": "Request validation failed",
+  "details": [
+    {
+      "field": "email",
+      "message": "Must be a valid email address",
+      "rejectedValue": "not-an-email"
+    },
+    {
+      "field": "age",
+      "message": "Must be at least 18",
+      "rejectedValue": 15
+    }
+  ],
+  "path": "/api/v1/users",
+  "timestamp": "2024-01-15T10:30:00Z"
+}
+```
+
+---
+
+### 7.2 Error code conventions
+
+Dùng format `SCREAMING_SNAKE_CASE` cho error codes — dễ đọc và tìm kiếm trong code:
+
+```
+# Auth errors
+AUTH_TOKEN_MISSING
+AUTH_TOKEN_EXPIRED
+AUTH_TOKEN_INVALID
+AUTH_INSUFFICIENT_PERMISSIONS
+
+# Resource errors
+USER_NOT_FOUND
+ORDER_NOT_FOUND
+PRODUCT_NOT_FOUND
+
+# Business rule errors
+INSUFFICIENT_BALANCE
+ORDER_ALREADY_CANCELLED
+COURSE_REGISTRATION_CLOSED
+SEAT_NOT_AVAILABLE
+USER_ALREADY_ENROLLED
+
+# Validation errors
+VALIDATION_ERROR
+INVALID_EMAIL_FORMAT
+REQUIRED_FIELD_MISSING
+
+# System errors
+INTERNAL_SERVER_ERROR
+SERVICE_UNAVAILABLE
+RATE_LIMIT_EXCEEDED
+```
+
+---
+
+### 7.3 Không leak thông tin nội bộ trong error message
+
+```json
+// ❌ Sai — tiết lộ quá nhiều về hệ thống
+{
+  "message": "ERROR: duplicate key value violates unique constraint \"users_email_key\" (SQLSTATE 23505)"
+}
+
+// ❌ Sai — stack trace trong production
+{
+  "message": "NullPointerException at line 42 in UserService.go"
+}
+
+// ✅ Đúng — message thân thiện với user, log chi tiết ở server
+{
+  "code": "EMAIL_ALREADY_EXISTS",
+  "message": "An account with this email already exists. Please use a different email or login."
+}
+// Server log (không gửi cho client):
+// ERROR: duplicate key constraint on users.email for value "a@gmail.com" - request_id: xxx
+```
+
+---
+
+## 8. Pagination — Phân Trang
+
+### 8.1 Offset Pagination (phổ biến nhất)
+
+Phù hợp cho hầu hết use cases. Dùng `page` + `limit`.
+
+```
+GET /users?page=1&limit=20
+GET /users?page=2&limit=20
+GET /orders?page=1&limit=50&sort=createdAt&order=desc
+```
+
+```json
+// Response:
+{
+  "data": [ ... ],
+  "meta": {
+    "total": 235,        // Tổng số records
+    "page": 2,           // Trang hiện tại
+    "limit": 20,         // Số records mỗi trang
+    "totalPages": 12,    // Tổng số trang
+    "hasNext": true,     // Còn trang sau không
+    "hasPrev": true      // Còn trang trước không
+  }
+}
+```
+
+**Default values:**
+```
+page  = 1    (mặc định trang 1 nếu không truyền)
+limit = 20   (mặc định 20 items)
+limit max = 100  (không cho phép > 100 để tránh query quá lớn)
+```
+
+---
+
+### 8.2 Cursor Pagination (cho real-time data)
+
+Phù hợp khi data thay đổi liên tục (news feed, activity log, chat). Offset pagination bị lệch khi có data mới insert.
+
+```
+# Lần đầu:
+GET /posts?limit=20
+
+# Lần tiếp — dùng cursor từ response trước:
+GET /posts?cursor=eyJpZCI6IjEyMyJ9&limit=20
+```
+
+```json
+// Response:
+{
+  "data": [ ... ],
+  "meta": {
+    "nextCursor": "eyJpZCI6IjE0MyJ9",   // null nếu không còn data
+    "prevCursor": "eyJpZCI6IjEwMyJ9",
+    "hasNext": true,
+    "limit": 20
+  }
+}
+```
+
+> **Cursor** thường là base64 encode của `{ "id": "last-item-id", "createdAt": "..." }`.
+
+---
+
+## 9. Filtering, Sorting & Searching
+
+### 9.1 Filtering
+
+```
+# Filter đơn giản — exact match
+GET /users?status=active
+GET /users?role=admin&status=active        (AND condition)
+
+# Filter với operators
+GET /products?price[gte]=100&price[lte]=500    (price >= 100 AND <= 500)
+GET /orders?createdAt[gte]=2024-01-01
+GET /users?age[gt]=18
+
+# Filter với array (IN condition)
+GET /products?category[in]=electronics,clothing,books
+
+# Operators chuẩn:
+# eq  = equal (mặc định)
+# ne  = not equal
+# gt  = greater than
+# gte = greater than or equal
+# lt  = less than
+# lte = less than or equal
+# in  = in array
+# nin = not in array
+# like = contains (search)
+```
+
+---
+
+### 9.2 Sorting
+
+```
+# Sort theo một field
+GET /users?sort=name&order=asc
+GET /users?sort=createdAt&order=desc
+
+# Sort theo nhiều fields
+GET /users?sort=lastName,firstName&order=asc,asc
+GET /products?sort=category,price&order=asc,desc
+```
+
+---
+
+### 9.3 Searching
+
+```
+# Search toàn văn
+GET /users?q=nguyen+van+a
+GET /products?q=laptop+gaming
+
+# Search trên field cụ thể
+GET /users?name[like]=nguyen
+GET /products?description[like]=wireless
+```
+
+---
+
+### 9.4 Kết hợp tất cả
+
+```
+GET /products
+  ?q=laptop              ← search
+  &category=electronics  ← filter
+  &price[gte]=500        ← filter với operator
+  &price[lte]=2000
+  &sort=price            ← sort
+  &order=asc
+  &page=1                ← pagination
+  &limit=20
+```
+
+---
+
+## 10. Versioning — Quản Lý Phiên Bản
+
+### 10.1 Khi nào cần versioning?
+
+Versioning cần thiết khi thực hiện **breaking changes**:
+
+```
+Breaking changes (cần version mới):
+✗ Xóa field trong response
+✗ Đổi tên field
+✗ Đổi kiểu dữ liệu của field
+✗ Thay đổi behavior của endpoint
+✗ Xóa endpoint
+
+Non-breaking changes (không cần version mới):
+✓ Thêm field mới vào response
+✓ Thêm endpoint mới
+✓ Thêm query parameter mới (optional)
+```
+
+---
+
+### 10.2 URL Versioning (Recommended)
+
+Đây là cách phổ biến nhất, rõ ràng và dễ debug:
+
+```
+https://api.example.com/v1/users
+https://api.example.com/v2/users    ← Breaking change → version mới
+
+# File structure trong code:
+/api
+  /v1
+    /users
+    /orders
+  /v2
+    /users      ← Chỉ cần thêm file mới, không sửa v1
+    /orders     ← Kế thừa từ v1 nếu không có breaking change
+```
+
+---
+
+### 10.3 Deprecation Policy
+
+```
+# Response header để thông báo deprecated:
+Deprecation: true
+Sunset: Sat, 31 Dec 2025 23:59:59 GMT    ← Ngày v1 bị tắt
+Link: <https://api.example.com/v2/users>; rel="successor-version"
+
+# Quy trình:
+1. Release v2
+2. Thông báo deprecation v1 (email, changelog, response header)
+3. Duy trì v1 ít nhất 6 tháng
+4. Sunset v1
+```
+
+---
+
+## 11. Authentication & Authorization
+
+### 11.1 JWT Authentication Flow
+
+```
+1. Client gửi credentials:
+POST /auth/login
+{
+  "email": "user@example.com",
+  "password": "password123"
+}
+
+2. Server trả về tokens:
+{
+  "data": {
+    "accessToken": "eyJhbGc...",    ← Dùng để authenticate (ngắn hạn: 15 phút)
+    "refreshToken": "eyJhbGc...",   ← Dùng để lấy accessToken mới (dài hạn: 7 ngày)
+    "expiresIn": 900                ← seconds
+  }
+}
+
+3. Client gửi accessToken trong header:
+Authorization: Bearer eyJhbGc...
+
+4. Khi accessToken hết hạn, dùng refreshToken:
+POST /auth/refresh-token
+{
+  "refreshToken": "eyJhbGc..."
+}
+```
+
+---
+
+### 11.2 Authorization — Phân quyền trong API
+
+```
+# Role-based: Kiểm tra role trong middleware
+GET /admin/users          ← Chỉ admin
+GET /users/{id}/orders    ← User chỉ xem được orders của chính mình
+DELETE /users/{id}        ← Admin hoặc chính user đó
+
+# Trả về đúng status:
+401 Unauthorized    ← Không có token / token invalid / token hết hạn
+403 Forbidden       ← Có token nhưng không có quyền
+
+# Ví dụ response khi không có quyền:
+HTTP 403 Forbidden
+{
+  "code": "AUTH_INSUFFICIENT_PERMISSIONS",
+  "message": "You don't have permission to access this resource"
+}
+```
+
+---
+
+## 12. Security Headers & Best Practices
+
+### 12.1 Security Headers bắt buộc
+
+```http
+# Response headers từ server
+Content-Type: application/json; charset=utf-8
+X-Content-Type-Options: nosniff           ← Ngăn MIME sniffing
+X-Frame-Options: DENY                     ← Ngăn clickjacking
+X-XSS-Protection: 1; mode=block          ← XSS protection
+Strict-Transport-Security: max-age=31536000; includeSubDomains  ← HTTPS only
+Content-Security-Policy: default-src 'self'
+Cache-Control: no-store                   ← Cho sensitive endpoints
+```
+
+---
+
+### 12.2 Input Validation — Validate mọi thứ
+
+```go
+// Validate tất cả input, không tin bất kỳ data nào từ client
+
+type CreateUserRequest struct {
+    Email     string `json:"email" validate:"required,email,max=255"`
+    Password  string `json:"password" validate:"required,min=8,max=128"`
+    Name      string `json:"name" validate:"required,min=2,max=100"`
+    Age       int    `json:"age" validate:"required,min=0,max=150"`
+    Role      string `json:"role" validate:"required,oneof=student teacher admin"`
+}
+
+// ❌ Không bao giờ để client tự set:
+// - ID (dùng UUID generated server-side)
+// - createdAt / updatedAt (generated server-side)
+// - role với giá trị tùy ý (validate enum)
+// - isAdmin = true (phải có permission riêng)
+```
+
+---
+
+### 12.3 Sensitive Data
+
+```
+❌ Không bao giờ trong URL (vào server logs):
+GET /users?password=abc123
+GET /auth?token=jwt-token-here
+
+✅ Luôn trong header hoặc body:
+Authorization: Bearer jwt-token-here
+POST /auth/reset-password { "token": "..." }
+
+❌ Không log sensitive data:
+log.Info("User login", "password", req.Password)    // KHÔNG BAO GIỜ
+
+✅ Chỉ log non-sensitive:
+log.Info("User login attempt", "email", req.Email, "ip", clientIP)
+```
+
+---
+
+## 13. Rate Limiting
+
+### 13.1 Cấu hình rate limit theo endpoint
+
+```
+# Phân loại theo mức độ nhạy cảm:
+
+Public endpoints (không cần auth):
+  GET /products          → 100 req/min per IP
+  GET /categories        → 200 req/min per IP
+
+Auth endpoints (sensitive):
+  POST /auth/login       → 5 req/min per IP     ← Brute force protection
+  POST /auth/register    → 3 req/min per IP
+  POST /auth/forgot-password → 3 req/min per IP
+
+Authenticated endpoints:
+  GET /users/me          → 60 req/min per user
+  POST /orders           → 10 req/min per user
+  POST /payments         → 5 req/min per user   ← Extra strict
+```
+
+---
+
+### 13.2 Rate Limit Response Headers
+
+```http
+HTTP 429 Too Many Requests
+{
+  "code": "RATE_LIMIT_EXCEEDED",
+  "message": "Too many requests. Please try again after 60 seconds."
+}
+
+# Response headers:
+X-RateLimit-Limit: 100           ← Giới hạn tối đa
+X-RateLimit-Remaining: 0         ← Số request còn lại
+X-RateLimit-Reset: 1705312800    ← Unix timestamp lúc reset
+Retry-After: 60                  ← Giây chờ trước khi thử lại
+```
+
+---
+
+## 14. API Documentation với Swagger
+
+### 14.1 Yêu cầu tối thiểu cho mỗi endpoint
+
+```go
+// Mỗi endpoint phải có đầy đủ annotations sau:
+
+// @Summary      Mô tả ngắn (1 dòng)
+// @Description  Mô tả chi tiết behavior, edge cases
+// @Tags         users
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        id    path     string              true  "User ID (UUID)"
+// @Param        body  body     UpdateUserRequest   true  "Update payload"
+// @Success      200   {object} Response{data=UserDTO}    "Updated user"
+// @Failure      400   {object} ErrorResponse             "Validation error"
+// @Failure      401   {object} ErrorResponse             "Unauthorized"
+// @Failure      403   {object} ErrorResponse             "Forbidden"
+// @Failure      404   {object} ErrorResponse             "User not found"
+// @Failure      500   {object} ErrorResponse             "Internal server error"
+// @Router       /users/{id} [patch]
+func (h *UserHandler) UpdateUser(c *gin.Context) { ... }
+```
+
+---
+
+### 14.2 Swagger UI phải accessible ở môi trường dev/staging
+
+```
+Development:  http://localhost:8080/api/docs
+Staging:      https://api-staging.example.com/api/docs
+Production:   ❌ Không expose Swagger (hoặc có auth)
+```
+
+---
+
+## 15. Checklist Review Trước Khi Merge
+
+> [!NOTE]
+> PR có chứa API mới hoặc thay đổi API **bắt buộc** phải check toàn bộ list này trước khi request review.
+
+### URL & Method
+- [ ] URL dùng **lowercase** và **kebab-case**
+- [ ] URL dùng **danh từ** (không có động từ)
+- [ ] Dùng đúng **HTTP method** (GET/POST/PUT/PATCH/DELETE)
+- [ ] Không nest URL quá **3 cấp**
+- [ ] Có **versioning** prefix (`/v1/`)
+
+### Request
+- [ ] Input được **validate** đầy đủ (required, type, range, format)
+- [ ] Không có sensitive data trong **URL path hay query params**
+- [ ] Body dùng **camelCase** fields
+- [ ] Date/time dùng **ISO 8601** format
+
+### Response
+- [ ] Trả về đúng **HTTP status code**
+- [ ] Response dùng **cấu trúc chuẩn** `{ data, message }` hoặc `{ data, meta, message }`
+- [ ] **Không có sensitive data** trong response (password, internal tokens,...)
+- [ ] Response có **pagination** cho danh sách (nếu > 20 items)
+
+### Error Handling
+- [ ] Error response dùng **cấu trúc chuẩn** `{ code, message, details }`
+- [ ] Error **code** dùng `SCREAMING_SNAKE_CASE`
+- [ ] Error message **không leak** internal implementation details
+- [ ] Validation errors trả về **tất cả lỗi cùng lúc** (không chỉ lỗi đầu tiên)
+
+### Security
+- [ ] Endpoint cần auth đã có **JWT middleware**
+- [ ] **Authorization** check đúng (403 vs 401)
+- [ ] **Rate limiting** đã được cấu hình
+- [ ] Không có **SQL injection** vulnerability (dùng parameterized query)
+
+### Documentation
+- [ ] Swagger annotations **đầy đủ** (summary, params, responses)
+- [ ] Tất cả error cases được **document** trong Swagger
+- [ ] **CHANGELOG** được cập nhật nếu là breaking change
+
+---
+
+## 🔗 Tài Nguyên Tham Khảo
+
+- [RFC 7231 — HTTP/1.1 Semantics](https://tools.ietf.org/html/rfc7231)
+- [JSON API Specification](https://jsonapi.org)
+- [Microsoft REST API Guidelines](https://github.com/microsoft/api-guidelines)
+- [Google API Design Guide](https://cloud.google.com/apis/design)
+- [Swagger / OpenAPI Specification](https://swagger.io/specification)
+- [OWASP API Security Top 10](https://owasp.org/www-project-api-security)
+
+---
+
+*Mọi thắc mắc về document này, liên hệ **@minh (Backend Lead)** trên Slack hoặc mở Issue trên GitHub repo.*
+
+*Last updated: 2026 — Version 1.0.0*

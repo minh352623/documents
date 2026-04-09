@@ -124,33 +124,141 @@ sentinel auth-pass mymaster your_redis_password
 
 ## 3. Redis Cluster
 
-### 3.1 Kiến trúc
+### 3.1 Kiến trúc tổng quan
+
+> ⚠️ **Hiểu lầm phổ biến nhất:** "Master và Replica cùng 1 Shard → nếu Shard chết sẽ mất data?"
+>
+> **Sai.** "Shard" là **khái niệm logic** (tập hợp hash slots), không phải vật lý. Master và Replica của cùng 1 Shard **bắt buộc chạy trên 2 máy vật lý khác nhau**. Redis Cluster tự kiểm tra và từ chối assign replica lên cùng host với master của shard đó.
+
+Kiến trúc đúng — 6 Redis process trên **3 server vật lý**:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                       Redis Cluster                              │
-│                   16384 hash slots total                         │
-│                                                                  │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌────────────────┐ │
-│  │  Shard 1         │  │  Shard 2         │  │  Shard 3       │ │
-│  │  Slots: 0–5460   │  │  Slots: 5461–    │  │  Slots: 10923– │ │
-│  │                  │  │  10922           │  │  16383         │ │
-│  │  ┌────────────┐  │  │  ┌────────────┐  │  │ ┌───────────┐  │ │
-│  │  │  Master A  │  │  │  │  Master B  │  │  │ │ Master C  │  │ │
-│  │  │  :7000     │  │  │  │  :7002     │  │  │ │ :7004     │  │ │
-│  │  └────────────┘  │  │  └────────────┘  │  │ └───────────┘  │ │
-│  │        │         │  │        │         │  │       │         │ │
-│  │  ┌────────────┐  │  │  ┌────────────┐  │  │ ┌───────────┐  │ │
-│  │  │ Replica A  │  │  │  │ Replica B  │  │  │ │Replica C  │  │ │
-│  │  │  :7001     │  │  │  │  :7003     │  │  │ │ :7005     │  │ │
-│  │  └────────────┘  │  │  └────────────┘  │  │ └───────────┘  │ │
-│  └──────────────────┘  └──────────────────┘  └────────────────┘ │
-│                                                                  │
-│  Client → CRC16(key) % 16384 → chọn đúng shard                  │
-└──────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                          Redis Cluster — Physical Layout                        │
+│                                                                                │
+│   Server A (AZ-1)            Server B (AZ-2)           Server C (AZ-3)        │
+│   192.168.1.10               192.168.1.11              192.168.1.12            │
+│  ┌─────────────────┐        ┌─────────────────┐       ┌─────────────────┐     │
+│  │ ┌─────────────┐ │        │ ┌─────────────┐ │       │ ┌─────────────┐ │     │
+│  │ │  Master 1   │ │        │ │  Master 2   │ │       │ │  Master 3   │ │     │
+│  │ │ Slots 0–5460│ │        │ │Slots 5461–  │ │       │ │Slots 10923– │ │     │
+│  │ │   :7000     │ │        │ │  10922      │ │       │ │  16383      │ │     │
+│  │ └──────┬──────┘ │        │ │   :7002     │ │       │ │   :7004     │ │     │
+│  │        │repl    │        │ └──────┬──────┘ │       │ └──────┬──────┘ │     │
+│  │ ┌──────▼──────┐ │        │        │repl    │       │        │repl    │     │
+│  │ │  Replica 3  │ │        │ ┌──────▼──────┐ │       │ ┌──────▼──────┐ │     │
+│  │ │(backup Shard│ │        │ │  Replica 1  │ │       │ │  Replica 2  │ │     │
+│  │ │    3)       │ │        │ │(backup Shard│ │       │ │(backup Shard│ │     │
+│  │ │   :7005     │ │        │ │    1)       │ │       │ │    2)       │ │     │
+│  │ └─────────────┘ │        │ │   :7001     │ │       │ │   :7003     │ │     │
+│  └─────────────────┘        │ └─────────────┘ │       │ └─────────────┘ │     │
+│                             └─────────────────┘       └─────────────────┘     │
+│                                                                                │
+│  Cross-server replication (async):                                             │
+│  Master 1 (ServerA) ──────────────────────────► Replica 1 (ServerB)           │
+│  Master 2 (ServerB) ──────────────────────────► Replica 2 (ServerC)           │
+│  Master 3 (ServerC) ──────────────────────────► Replica 3 (ServerA)           │
+│                                                                                │
+│  Client → CRC16(key) % 16384 → connect thẳng đến đúng Master                  │
+└────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Hash Slot — Cơ chế phân tán dữ liệu
+**Quy tắc anti-affinity của Redis Cluster:**
+- Redis Cluster **tự động** đảm bảo Replica của Shard X không được đặt cùng host với Master X.
+- Khi chạy `redis-cli --cluster create`, flag `--cluster-replicas 1` tự động phân bổ theo quy tắc này.
+- Nếu tất cả nodes đang cùng 1 host (lab/dev), Redis sẽ **cảnh báo** nhưng vẫn cho phép — chỉ nguy hiểm trong production.
+
+### 3.2 Fault Tolerance — Điều gì xảy ra khi có sự cố?
+
+#### Kịch bản 1: Một Master chết (server sống, process chết)
+
+```
+Trước:  Master 1 (ServerA) ──repl──► Replica 1 (ServerB)
+
+Sau khi Master 1 process crash:
+  Step 1: Các node còn lại detect Master 1 không phản hồi (cluster-node-timeout = 5s)
+  Step 2: Majority nodes đồng ý → Master 1 bị FAIL
+  Step 3: Replica 1 (ServerB) tự promote lên Master 1 mới
+  Step 4: Cluster cập nhật slot ownership: Slots 0–5460 → ServerB
+  Step 5: Client nhận MOVED redirect, tự reconnect
+  Thời gian: ~10–20 giây
+  Data loss: Các write chưa replicate trong ~vài ms cuối (async replication)
+```
+
+#### Kịch bản 2: Cả một Server vật lý chết (ServerA down)
+
+```
+ServerA chứa: Master 1 (Slots 0–5460) + Replica 3 (backup Shard 3)
+
+Hậu quả:
+  ✅ Shard 1: Master 1 chết → Replica 1 (ServerB) promote → cluster tiếp tục serve
+  ⚠️ Shard 3: Replica 3 chết → Master 3 (ServerC) còn sống nhưng MẤT REPLICA
+             → Cluster vẫn hoạt động nhưng Shard 3 đang "unprotected"
+             → Nếu ServerC tiếp tục chết → Shard 3 mất hoàn toàn
+
+  Trạng thái cluster sau: cluster_state = ok, nhưng 1 shard thiếu replica
+  Cần action: Add node mới và rebalance replica ngay lập tức
+```
+
+#### Kịch bản 3: Khi nào thực sự mất data?
+
+```
+Mất data của 1 Shard khi: Master VÀ Replica của cùng 1 Shard đều chết
+
+Ví dụ "double failure":
+  T=0:    Master 1 (ServerA) chết → bắt đầu failover
+  T=8s:   Replica 1 (ServerB) cũng chết TRƯỚC khi promote xong
+  Result: Shard 1 không còn node nào → data of Slots 0–5460 mất
+
+Xác suất xảy ra:
+  → Gần như 0 nếu Master và Replica ở 3 AZ khác nhau
+  → Có thể xảy ra nếu deploy cùng AZ hoặc cùng rack
+
+Hành vi của cluster khi 1 shard mất hoàn toàn:
+  cluster-require-full-coverage yes  → cluster vào FAIL state, từ chối mọi query
+  cluster-require-full-coverage no   → cluster tiếp tục serve các shard còn lại
+```
+
+#### Tóm tắt fault tolerance matrix
+
+```
+Sự cố                          | Shard bị ảnh hưởng | Data loss | Cluster state
+-------------------------------|-------------------|-----------|---------------
+1 process crash                | Failover ~15s      | Tối thiểu | ok
+1 server vật lý down           | 1 shard failover   | Tối thiểu | ok (1 shard thiếu replica)
+2 servers cùng AZ down         | Tuỳ layout         | Có thể có | FAIL hoặc ok
+Master + Replica cùng shard down | 1 shard mất hoàn  | Có        | FAIL (nếu full-coverage=yes)
+```
+
+### 3.3 Best Practice — Physical Layout cho Production
+
+**Chuẩn deploy 3 AZ (khuyến nghị):**
+
+```
+AZ-1 (Server A): Master 1  (Shard 1) + Replica 3 (backup Shard 3)
+AZ-2 (Server B): Master 2  (Shard 2) + Replica 1 (backup Shard 1)
+AZ-3 (Server C): Master 3  (Shard 3) + Replica 2 (backup Shard 2)
+
+→ Bất kỳ 1 AZ nào down: cluster tự heal, KHÔNG mất data
+→ Phải 2 AZ down đồng thời mới có nguy cơ mất 1 shard
+→ Đây là lý do tối thiểu cần 3 AZ cho production Cluster
+```
+
+**Khi khởi tạo cluster, Redis tự phân bổ đúng nếu cung cấp đủ nodes từ các host khác nhau:**
+
+```bash
+# 6 nodes từ 3 server khác nhau → Redis tự đảm bảo anti-affinity
+redis-cli --cluster create \
+  192.168.1.10:7000 \   # Server A
+  192.168.1.11:7002 \   # Server B
+  192.168.1.12:7004 \   # Server C
+  192.168.1.10:7005 \   # Server A (sẽ là replica — Redis tự tránh assign cho Shard 1)
+  192.168.1.11:7001 \   # Server B (sẽ là replica — Redis tự tránh assign cho Shard 2)
+  192.168.1.12:7003 \   # Server C (sẽ là replica — Redis tự tránh assign cho Shard 3)
+  --cluster-replicas 1
+```
+
+### 3.4 Hash Slot — Cơ chế phân tán dữ liệu
 
 Redis Cluster chia data thành **16384 hash slots**. Mỗi key được map vào một slot:
 
@@ -172,14 +280,14 @@ MGET user:1001 user:1002  # ❌ Error nếu 2 key ở 2 shard khác nhau
 MGET {user:1001}:profile {user:1001}:session  # ✅ OK, cùng slot
 ```
 
-### 3.3 Ưu điểm
+### 3.5 Ưu điểm
 
 - ✅ **Scale horizontally** — thêm node là tăng capacity cả write lẫn storage.
 - ✅ **HA built-in** — mỗi shard có replica, failover tự động không cần Sentinel.
 - ✅ **Không giới hạn RAM** — data phân tán trên nhiều node.
 - ✅ **High throughput** — write được phân tán đều trên các Master.
 
-### 3.4 Nhược điểm
+### 3.6 Nhược điểm
 
 - ❌ **Multi-key operations bị giới hạn** — MGET, MSET, transactions chỉ work trong 1 slot.
 - ❌ **Lua scripts phức tạp hơn** — script chỉ run trên 1 node, keys phải cùng slot.
@@ -188,7 +296,7 @@ MGET {user:1001}:profile {user:1001}:session  # ✅ OK, cùng slot
 - ❌ **Phức tạp hơn** để setup, monitor, và debug.
 - ❌ **Resharding (rebalancing)** cần thời gian và có thể impact performance.
 
-### 3.5 Cấu hình cơ bản
+### 3.7 Cấu hình cơ bản
 
 **redis.conf (cluster node):**
 ```conf

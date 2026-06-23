@@ -92,6 +92,8 @@ Vào repo GitHub:
 - paste key
 - chọn `Read access`
 
+<!-- ![Deploy key đã được add thành công](./img/ci-cd-deploy-key-added.png) -->
+
 ### 3.3 Ép SSH trên VPS dùng đúng key này
 
 Tạo `/root/.ssh/config`:
@@ -122,6 +124,8 @@ git pull --ff-only origin <branch-deploy>
 ```
 
 Nếu `ssh -T git@github.com` báo `Permission denied (publickey)`, key VPS -> GitHub chưa đúng hoặc chưa được add vào Deploy keys.
+
+<!-- ![SSH test VPS → GitHub thành công](./img/ci-cd-ssh-test-success.png) -->
 
 ## 4. Setup SSH key cho GitHub Actions vào VPS
 
@@ -198,6 +202,8 @@ Giá trị:
 - `VPS_USER`: `root`
 - `VPS_SSH_KEY_B64`: private key base64 của `github_actions_deploy_nopass`
 - `VPS_KNOWN_HOSTS`: output của `ssh-keyscan`
+
+<!-- ![GitHub Secrets đã được tạo đầy đủ](./img/ci-cd-github-secrets-done.png) -->
 
 ## 6. Script deploy trên VPS
 
@@ -364,6 +370,9 @@ Nếu có domain:
 ```bash
 curl -I https://api-dhnct.chauthoi.io.vn/api/docs
 ```
+
+![Workflow GitHub Actions chạy thành công](/ci-cd-1.jpg)
+![Workflow GitHub Actions chạy thành công](/cd-ci-2.jpg)
 
 ## 11. Troubleshooting đã gặp trong thực tế
 

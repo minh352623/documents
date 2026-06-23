@@ -271,7 +271,7 @@ cd /root/apps/qltb/be
 
 ## 7. Workflow GitHub Actions
 
-File workflow hiện tại: [/.github/workflows/deploy-vps.yml](/Users/min/Documents/device-management/BE/.github/workflows/deploy-vps.yml)
+File workflow hiện tại: `.github/workflows/deploy-vps.yml`
 
 Context hiện tại:
 
@@ -310,7 +310,7 @@ Chạy:
 
 ## 8. Selective unit test script
 
-File: [scripts/ci/selective-unit-tests.sh](/Users/min/Documents/device-management/BE/scripts/ci/selective-unit-tests.sh)
+File: `scripts/ci/selective-unit-tests.sh`
 
 Logic hiện tại:
 
